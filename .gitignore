@@ -1,0 +1,23 @@
+# Credentials
+.env
+creds.yaml
+
+# Bot State & Data
+dashboard_data_*.json
+risk_state_*.json
+dashboard_data.json
+risk_state.json
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# IDEs
+.vscode/
+.idea/

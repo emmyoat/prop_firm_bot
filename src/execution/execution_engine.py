@@ -177,8 +177,8 @@ class ExecutionEngine:
                     count += 1
         
         if count > 0:
-            logger.info(f"Panic/Friday Close: Closed {count} positions.")
+            logger.info(f"System Close Requested: Closed {count} positions.")
             if self.notifier:
-                self.notifier.send_message(f"🚨 **Friday Exit**\nClosed {count} positions.")
+                self.notifier.send_message(f"🚨 **Emergency/Bulk Close**\nClosed {count} positions from magic {self.magic_number}.")
         
         return count

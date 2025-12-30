@@ -116,13 +116,13 @@ def main():
             # Friday Exit Check
             now = datetime.now()
             exit_hour = config['risk'].get('friday_exit_hour', 21)
-            # Weekday 4 is Friday
             if now.weekday() == 4 and now.hour >= exit_hour:
-                 # Check if we have open positions first to avoid spamming log
-                 if mt5.positions_total() > 0:
-                     logger.warning("FRIDAY EXIT TRIGGERED: Closing all positions.")
+                 # Check ONLY our bot's positions
+                 bot_positions = [p for p in mt5.positions_get() if p.magic == config['system']['magic_number']]
+                 if len(bot_positions) > 0:
+                     logger.warning("FRIDAY EXIT TRIGGERED: Closing bot positions.")
                      execution_engine.close_all_positions()
-                     time.sleep(60) # Wait a bit
+                     time.sleep(60)
             
             # News Auto Filter
             if news_loader.is_blocked():
@@ -150,7 +150,11 @@ def main():
                         for pos in positions:
                             if pos.type == mt5.ORDER_TYPE_BUY:
                                 current_bid = mt5.symbol_info_tick(symbol).bid
-                                profit_pips = (current_bid - pos.price_open) / point / 10
+                                # Dynamic Pip Factor: 10 for Forex/Gold, 1 for Indices
+                                # Indices use 1 point = 1 pip logic
+                                is_index = any(idx in symbol.upper() for idx in ["US30", "NAS100", "US100", "US500", "GER30", "DE30", "UK100", "JPN225"])
+                                pip_factor = 1 if is_index else 10
+                                profit_pips = (current_bid - pos.price_open) / point / pip_factor
                                 
                                 # Duration Check
                                 duration_seconds = time.time() - pos.time
@@ -159,22 +163,24 @@ def main():
 
                                 # Breakeven Check
                                 if profit_pips >= be_start_pips:
-                                    be_level = pos.price_open + (20 * point) # 2 pips profit secured
+                                    be_level = pos.price_open + (be_start_pips * 0.1 * pip_factor * point) # Secure initial risk
                                     if pos.sl < pos.price_open:
                                         execution_engine.modify_order(pos.ticket, sl=be_level, tp=pos.tp)
                                         logger.info(f"Moved BUY {pos.ticket} to Breakeven")
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    # Trail: SL = Current - 15 pips (150 points)
-                                    trail_dist_points = 150 * point 
+                                    # Trail: SL = Current - 15 pips
+                                    trail_dist_points = 150 * point if pip_factor == 10 else 15 * point
                                     new_sl = current_bid - trail_dist_points
                                     if new_sl > pos.sl:
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)
                             
                             elif pos.type == mt5.ORDER_TYPE_SELL:
                                 current_ask = mt5.symbol_info_tick(symbol).ask
-                                profit_pips = (pos.price_open - current_ask) / point / 10
+                                is_index = any(idx in symbol.upper() for idx in ["US30", "NAS100", "US100", "US500", "GER30", "DE30", "UK100", "JPN225"])
+                                pip_factor = 1 if is_index else 10
+                                profit_pips = (pos.price_open - current_ask) / point / pip_factor
                                 
                                 # Duration Check
                                 duration_seconds = time.time() - pos.time
@@ -183,14 +189,14 @@ def main():
 
                                 # Breakeven Check
                                 if profit_pips >= be_start_pips:
-                                    be_level = pos.price_open - (20 * point) # 2 pips profit
+                                    be_level = pos.price_open - (be_start_pips * 0.1 * pip_factor * point) 
                                     if pos.sl == 0.0 or pos.sl > pos.price_open:
                                         execution_engine.modify_order(pos.ticket, sl=be_level, tp=pos.tp)
                                         logger.info(f"Moved SELL {pos.ticket} to Breakeven")
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    trail_dist_points = 150 * point
+                                    trail_dist_points = 150 * point if pip_factor == 10 else 15 * point
                                     new_sl = current_ask + trail_dist_points
                                     if pos.sl == 0 or new_sl < pos.sl:
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)
@@ -227,14 +233,15 @@ def main():
                                 continue
 
                             # Risk Calculation
-                            sl_dist_points = abs(signal.price - signal.sl_price) / symbol_info.point
-                            if sl_dist_points == 0: sl_dist_points = 500
+                            sl_dist = abs(signal.price - signal.sl_price)
+                            # Ensure we don't have a zero SL
+                            if sl_dist == 0: sl_dist = 100 * symbol_info.point
                             
                             base_lot = risk_manager.calculate_lot_size(
                                 acc_info.equity, 
-                                sl_dist_points, 
+                                sl_dist, 
                                 symbol_info.trade_tick_value, 
-                                symbol_info.point
+                                symbol_info.trade_tick_size
                             )
                             
                             if base_lot > 0:

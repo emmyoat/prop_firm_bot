@@ -179,14 +179,9 @@ class LiquidityWickStrategy(Strategy):
                 if signal_type == SignalType.SELL and rsi_value < self.rsi_sell_threshold:
                      return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too low: {rsi_value:.1f}")
 
-            # Risk Friendly SL: Add Buffer (e.g., 50 points = 5 pips)
-
-            sl_buffer = 50 * 0.00001 # Assuming 5 decimal broker for XAUUSD? No, usually 0.01.
-            # We don't have 'point' info here easily without MT5 connection in strategy. 
-            # We'll treat data values as price. XAUUSD 1 pip = 0.10 or 0.01? 
-            # Usually XAUUSD 2000.00. 1 pip = 0.10. 5 pips = 0.50.
-            # Let's use 0.50 as buffer for XAUUSD.
-            sl_buffer_price = 0.50 
+            # Risk Friendly SL: Add Buffer based on symbol
+            sl_buffers = self.config['strategy'].get('sl_buffer_map', {})
+            sl_buffer_price = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
             
             if signal_type == SignalType.BUY:
                  stop_loss -= sl_buffer_price

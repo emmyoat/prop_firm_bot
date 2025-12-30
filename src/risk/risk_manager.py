@@ -109,29 +109,31 @@ class RiskManager:
 
         return True
 
-    def calculate_lot_size(self, account_balance: float, stop_loss_pips: float, tick_value: float, tick_size: float) -> float:
+    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float) -> float:
         """
         Calculates dynamic lot size based on risk percentage.
-        Formula: RiskAmount / (StopLossPoints * TickValuePerPoint)
-        
-        if stop_loss_pips <= 0:
+        Formula: RiskAmount / ((StopLossDistance / TickSize) * TickValue)
+        """
+        if stop_loss_dist <= 0:
             return 0.0
             
         risk_amount = account_balance * (self.config.account_equity_risk_pct / 100.0)
         
-        # Loss per 1 lot if SL hit = (SL_Points) * TickValue
-        loss_per_lot = stop_loss_pips * tick_value
+        # Loss per 1 lot if SL hit = (Distance / TickSize) * TickValue
+        # This is the most accurate formula for MT5 across all assets
+        loss_per_lot = (stop_loss_dist / tick_size) * tick_value
         
-        if loss_per_lot == 0:
+        if loss_per_lot <= 0:
             return 0.0
             
         lot_size = risk_amount / loss_per_lot
         
-        # Round logic (usually 2 decimals for FX)
-        lot_size = round(lot_size, 2)
+        # Round to 2 decimals
+        lot_size = floor(lot_size * 100) / 100.0
         
-        # Clamp to min/max if needed (handled by execution, but good safely here)
         if lot_size < 0.01: 
-            return 0.01 # Minimum lot
+            return 0.0
             
         return lot_size
+
+from math import floor

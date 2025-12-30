@@ -58,7 +58,6 @@ Run the built-in backtester (uses live MT5 data):
 ```bash
 python backtest.py
 ```
-*   **Recent Performance**: 52% Win Rate, +147% ROI (2% Risk), +9,510 Pips (Official Data).
 
 ## ▶️ Live Trading
 
@@ -66,7 +65,7 @@ python backtest.py
     Set `dry_run: true` in `config.yaml`.
     Run: `start_bot.bat`
 
-2.  **Real Money / Prop Challenge**:
+2.  **Prop Challenge**:
     Set `dry_run: false` in `config.yaml`.
     Run: `start_bot.bat`
 

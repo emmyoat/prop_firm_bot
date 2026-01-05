@@ -79,6 +79,8 @@ class LiquidityWickStrategy(Strategy):
                     stop_loss = last_candle['low'] 
                     price = last_candle['close']
                     # Limit logic handled below
+                else:
+                    logger.info(f"DEBUG: {symbol} Low-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
             
             # 2. BREAKOUT BUY (Continuation through Highs)
             # We need to find Resistance Level
@@ -109,6 +111,8 @@ class LiquidityWickStrategy(Strategy):
                     signal_type = SignalType.SELL
                     stop_loss = last_candle['high']
                     price = last_candle['close']
+                else:
+                    logger.info(f"DEBUG: {symbol} High-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
             
             # 2. BREAKOUT SELL (Continuation through Lows)
             support_level = df_entry.iloc[-self.lookback:-1]['low'].min()
@@ -121,6 +125,10 @@ class LiquidityWickStrategy(Strategy):
                     signal_type = SignalType.SELL
                     stop_loss = last_candle['high']
                     price = last_candle['close']
+                else:
+                    logger.info(f"DEBUG: {symbol} Sell-Breakout: Weak Body {(body/total):.2f} < 0.50")
+            else:
+                 logger.info(f"DEBUG: {symbol} No Sell Setup (Close {last_candle['close']:.2f} !< Supp {support_level:.2f})")
 
         if signal_type != SignalType.NEUTRAL:
             # DECISION: Market vs Limit Entry
@@ -175,8 +183,10 @@ class LiquidityWickStrategy(Strategy):
             enable_rsi = True
             if enable_rsi:
                 if signal_type == SignalType.BUY and rsi_value > self.rsi_buy_threshold: 
+                     logger.info(f"DEBUG: {symbol} Skipping BUY - RSI too high ({rsi_value:.1f} > {self.rsi_buy_threshold})")
                      return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too high: {rsi_value:.1f}")
                 if signal_type == SignalType.SELL and rsi_value < self.rsi_sell_threshold:
+                     logger.info(f"DEBUG: {symbol} Skipping SELL - RSI too low ({rsi_value:.1f} < {self.rsi_sell_threshold})")
                      return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too low: {rsi_value:.1f}")
 
             # Risk Friendly SL: Add Buffer based on symbol
@@ -221,12 +231,11 @@ class LiquidityWickStrategy(Strategy):
         # User specifically asked to "identify the current market structure".
         # Let's use SMA 50 as a proxy for trend direction for this MVP.
         sma = df['close'].rolling(window=self.sma_period).mean()
+        
         if sma.iloc[-1] > sma.iloc[-2]:
-             if df['close'].iloc[-1] > sma.iloc[-1]:
-                 return SignalType.BUY
+             return SignalType.BUY
         elif sma.iloc[-1] < sma.iloc[-2]:
-             if df['close'].iloc[-1] < sma.iloc[-1]:
-                 return SignalType.SELL
+             return SignalType.SELL
         
         return SignalType.NEUTRAL
 

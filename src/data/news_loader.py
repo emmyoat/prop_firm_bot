@@ -21,8 +21,11 @@ class NewsLoader:
             return
 
         try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
             logger.info("Fetching Economic News...")
-            response = requests.get(self.url, timeout=10)
+            response = requests.get(self.url, headers=headers, timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 self.cached_news = data
@@ -31,9 +34,11 @@ class NewsLoader:
                 logger.info(f"News updated. Found {len(data)} events. Blocked minutes: {len(self.blocked_minutes)}")
             else:
                 logger.error(f"Failed to fetch news. Status: {response.status_code}")
+                self.last_update = time.time() - 3300 # Retry in 5 mins (3600 - 3300 = 300s)
                 
         except Exception as e:
             logger.error(f"Error fetching news: {e}")
+            self.last_update = time.time() - 3300 # Retry in 5 mins
 
     def _process_blocked_times(self):
         """

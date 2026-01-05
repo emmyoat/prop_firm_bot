@@ -11,6 +11,8 @@ from src.execution.execution_engine import ExecutionEngine
 from src.utils.notifications import TelegramNotifier 
 from src.utils.stats import StatsReporter
 import src.models as models
+import requests
+import os
 
 
 import argparse
@@ -95,6 +97,16 @@ def main():
                     notifier.send_message(f"🚨 **RISK BREACH DETECTED**\n{reason}\nAll trades closed. Bot paused.")
                 # Pause bot to prevent further trading
                 time.sleep(600) # Sleep 10 mins
+                continue
+
+            # Check Profit Target
+            target_hit, succ_msg = risk_manager.check_profit_target(acc_info.equity)
+            if target_hit:
+                logger.info(f"PROFIT TARGET REACHED: {succ_msg}. Closing all positions and pausing.")
+                execution_engine.close_all_positions()
+                if config['telegram']['enabled']:
+                    notifier.send_message(f"💰 **DAILY TARGET HIT**\n{succ_msg}\nTrades closed. See you tomorrow! 🥂")
+                time.sleep(900) # Sleep 15 mins to avoid spam
                 continue
 
             # Performance Reporting (Every 60 mins)
@@ -322,6 +334,8 @@ def main():
                         })
 
                 dashboard_data = {
+                    "bot_id": str(config['system']['magic_number']),
+                    "account_name": acc.name if acc else "Unknown",
                     "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
                     "balance": acc.balance if acc else 0.0,
                     "equity": acc.equity if acc else 0.0,
@@ -337,6 +351,25 @@ def main():
                 dashboard_filename = f"dashboard_data_{config['system']['magic_number']}.json"
                 with open(dashboard_filename, "w") as f:
                     json.dump(dashboard_data, f, indent=4)
+                
+                # --- CLOUD SYNC ---
+                dashboard_url = os.environ.get('DASHBOARD_URL')
+                api_key = os.environ.get('DASHBOARD_API_KEY')
+                
+                if dashboard_url:
+                    try:
+                        resp = requests.post(
+                            f"{dashboard_url.rstrip('/')}/api/index",
+                            json=dashboard_data,
+                            headers={"X-API-Key": api_key if api_key else "propbot-secret"},
+                            timeout=5
+                        )
+                        if resp.status_code == 200:
+                            logger.info("Cloud Dashboard Updated")
+                        else:
+                            logger.warning(f"Cloud update failed: {resp.status_code}")
+                    except Exception as cloud_err:
+                        logger.warning(f"Cloud sync error: {cloud_err}")
                     
             except Exception as e:
                 logger.error(f"Dashboard Export Failed: {e}")

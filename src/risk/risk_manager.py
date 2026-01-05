@@ -94,6 +94,19 @@ class RiskManager:
 
         return False, ""
 
+    def check_profit_target(self, current_equity: float) -> Tuple[bool, str]:
+        """Checks if the daily profit target has been reached."""
+        if self.daily_starting_equity <= 0:
+            return False, ""
+            
+        profit = current_equity - self.daily_starting_equity
+        profit_pct = (profit / self.daily_starting_equity) * 100.0
+        
+        if profit_pct >= self.config.profit_target_daily_pct:
+            return True, f"Daily Profit Target Hit: {profit_pct:.2f}% >= {self.config.profit_target_daily_pct}%"
+            
+        return False, ""
+
     def check_trade_allowed(self, account_info, symbol_info, spread_points: float) -> bool:
         """Validates if a new trade is allowed based on Prop Firm rules."""
         # Check emergency exit first

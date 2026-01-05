@@ -18,8 +18,8 @@ risk:
   
   # Advanced Management (OPTIMIZED)
   breakeven_activation_pips: 20   # Move SL to Entry when profit > 20 pips
-  trailing_stop_activation_pips: 45 # Start trailing when profit > 45 pips
-  trailing_step_pips: 12         # Move SL every 12 pips
+  trailing_stop_activation_pips: 50 # Start trailing when profit > 50 pips
+  trailing_step_pips: 25         # Move SL every 25 pips
   friday_exit_hour: 21              # Close all trades Friday at 21:00
   min_trade_duration_seconds: 240 # Scalping Policy: Min holder time 4 mins
 

@@ -39,9 +39,11 @@ def run_backtest(friday_exit_enabled=True):
             
             if df_entry is None or df_trend is None:
                 try:
+                    print(f"DEBUG: Downloading data for {symbol}...")
                     tf_map = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "1h", "D1": "1d"} 
-                    df_entry = yf.download(yf_ticker, period="6mo", interval=tf_map.get(tf_entry, "1h"), progress=False)
-                    df_trend = yf.download(yf_ticker, period="1y", interval=tf_map.get(tf_trend, "1d"), progress=False)
+                    df_entry = yf.download(yf_ticker, period="1mo", interval=tf_map.get(tf_entry, "1h"), progress=False)
+                    df_trend = yf.download(yf_ticker, period="3mo", interval=tf_map.get(tf_trend, "1d"), progress=False)
+                    print(f"DEBUG: Data downloaded. Entry={len(df_entry)}, Trend={len(df_trend)}")
                     if df_entry.empty: continue
                     df_entry.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_entry.columns]
                     df_trend.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_trend.columns]
@@ -74,14 +76,41 @@ def run_backtest(friday_exit_enabled=True):
                     continue
 
                 # Management
+                trailing_activation = config['risk'].get('trailing_stop_activation_pips', 50) * pip_unit
+                trailing_step = config['risk'].get('trailing_step_pips', 25) * pip_unit
+                
                 for t in active_trades[:]:
                     exit_price = None
+                    # Verify TP/SL hit FIRST
                     if t['type'] == 'BUY':
                         if bar['low'] <= t['sl']: exit_price = t['sl']
                         elif t['tp'] > 0 and bar['high'] >= t['tp']: exit_price = t['tp']
-                    else:
+                        
+                        # Trailing Stop Update (High of bar - Entry > Activation)
+                        if not exit_price:
+                            profit_dist = bar['high'] - t['entry']
+                            if profit_dist >= trailing_activation:
+                                # New SL should be: Current Price (High) - Trailing Dist? 
+                                # No, usually "Breakeven" or "Step". 
+                                # Simple logic: If we are X pips up, move SL to (Price - Step)? 
+                                # Std PropBot Logic: Move SL to lock in profit. 
+                                # Let's approximate: If High > Last_High_Mark, move SL up.
+                                # Simplified: If Profit > Activation, SL = Entry + (Profit - Activation)?
+                                # Let's use the explicit "Step" logic.
+                                # Calculate theoretical new SL
+                                new_sl = t['entry'] + (profit_dist - trailing_step) # Very rough
+                                if new_sl > t['sl']: t['sl'] = new_sl
+
+                    else: # SELL
                         if bar['high'] >= t['sl']: exit_price = t['sl']
                         elif t['tp'] > 0 and bar['low'] <= t['tp']: exit_price = t['tp']
+                        
+                        # Trailing Stop Update
+                        if not exit_price:
+                            profit_dist = t['entry'] - bar['low']
+                            if profit_dist >= trailing_activation:
+                                new_sl = t['entry'] - (profit_dist - trailing_step)
+                                if new_sl < t['sl']: t['sl'] = new_sl
                     
                     if exit_price:
                         t['pnl'] = (exit_price - t['entry']) if t['type'] == 'BUY' else (t['entry'] - exit_price)

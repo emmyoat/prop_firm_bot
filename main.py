@@ -182,8 +182,8 @@ def main():
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    # Trail: SL = Current - 15 pips
-                                    trail_dist_points = 150 * point if pip_factor == 10 else 15 * point
+                                    # Trail: SL = Current - Trailing Step (Distance)
+                                    trail_dist_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
                                     new_sl = current_bid - trail_dist_points
                                     if new_sl > pos.sl:
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)
@@ -208,7 +208,7 @@ def main():
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    trail_dist_points = 150 * point if pip_factor == 10 else 15 * point
+                                    trail_dist_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
                                     new_sl = current_ask + trail_dist_points
                                     if pos.sl == 0 or new_sl < pos.sl:
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)

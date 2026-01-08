@@ -14,11 +14,10 @@
 <body>
     <div class="container">
         <header>
-            <div style="display: flex; align-items: center; gap: 1.5rem;">
-                <h1>🤖 PropBot Cloud</h1>
+            <div class="header-content">
+                <h1>🤖 PropBot </h1>
                 <div class="account-switcher">
-                    <span
-                        style="font-size: 0.75rem; color: var(--text-secondary); text-transform: uppercase;">Account:</span>
+                    <span class="account-label">Account:</span>
                     <select id="bot-selector" onchange="window.selectedBotId = this.value; updateUI();">
                         <option value="">Detecting Bots...</option>
                     </select>
@@ -55,8 +54,9 @@
             </div>
         </div>
 
+
         <section>
-            <h2 style="margin-bottom: 1.5rem;">Active Positions</h2>
+            <h2>Active Positions</h2>
             <div class="table-container">
                 <table>
                     <thead>
@@ -72,7 +72,7 @@
                     </thead>
                     <tbody id="positions-table">
                         <tr>
-                            <td colspan="7" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                            <td colspan="7" class="empty-state">
                                 Waiting for data...</td>
                         </tr>
                     </tbody>
@@ -128,9 +128,10 @@
             if (!botData) return;
 
             // Update KPIs
-            document.getElementById('equity').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(botData.equity);
-            document.getElementById('balance').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(botData.balance);
-            document.getElementById('daily-pnl').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(botData.daily_pnl);
+            const currencyCode = botData.currency || 'USD'; 
+            document.getElementById('equity').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.equity);
+            document.getElementById('balance').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.balance);
+            document.getElementById('daily-pnl').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.daily_pnl);
             document.getElementById('daily-dd').textContent = botData.daily_dd.toFixed(2) + '%';
             document.getElementById('overall-dd').textContent = botData.overall_dd.toFixed(2) + '%';
             document.getElementById('win-rate').textContent = botData.win_rate.toFixed(1) + '%';
@@ -151,11 +152,11 @@
                         <td>${p.lots.toFixed(2)}</td>
                         <td>${p.open_price.toFixed(5)}</td>
                         <td>${p.current_price.toFixed(5)}</td>
-                        <td class="${p.profit >= 0 ? 'positive' : 'negative'}">${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(p.profit)}</td>
+                        <td class="${p.profit >= 0 ? 'positive' : 'negative'}">${new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(p.profit)}</td>
                     </tr>
                 `).join('');
             } else {
-                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; padding: 2rem; color: var(--text-secondary);">No active positions</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No active positions</td></tr>';
             }
         }
 

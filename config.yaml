@@ -4,22 +4,28 @@ system:
   magic_number: 123456
   log_level: "INFO"
   mt5_path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
-  dry_run: true  # Set to true for weekend testing
+  dry_run: false 
   symbol_list: ["XAUUSD", "US30", "USTECH100"]
   timeframe: "M15"  # MT5 Timeframe constant name or string
 
 risk:
-  account_equity_risk_pct: 2.0  # OPTIMIZED: 2% Risk (High Growth, Moderate Safety)
+  account_equity_risk_pct: 1.0  # OPTIMIZED: Reduced to 1% to lower lot size/drawdown risk
   max_daily_loss_pct: 4.0       # Dynamic daily loss limit
   max_overall_drawdown_pct: 10.0 # Absolute max drawdown
-  profit_target_daily_pct: 5.0  # Optional daily target to stop trading
-  max_spread_points: 15         # Max spread allowed to take trade
+  profit_target_daily_pct: 10.0  # Optional daily target to stop trading
+  max_spread_points: 15         # Default Max spread
+  spread_limit_map:             # Specific limits per pair
+    US30: 200                   # US30 needs wider allowance (approx 20 pips)
+    USTECH100: 200
+    NAS100: 200
+    XAUUSD: 30                  # Gold spread allowance
   martingale_multiplier: 1.0    # 1.0 = No Martingale (Recommended)
   
-  # Advanced Management (OPTIMIZED)
+  # Advanced Management
   breakeven_activation_pips: 20   # Move SL to Entry when profit > 20 pips
   trailing_stop_activation_pips: 50 # Start trailing when profit > 50 pips
-  trailing_step_pips: 25         # Move SL every 25 pips
+  trailing_stop_distance_pips: 25   # Distance of SL from Price (Previous: trailing_step_pips)
+  trailing_update_step_pips: 5      # Only update SL if it moves at least this many pips (Anti-Spam)
   friday_exit_hour: 21              # Close all trades Friday at 21:00
   min_trade_duration_seconds: 240 # Scalping Policy: Min holder time 4 mins
 
@@ -40,12 +46,12 @@ strategy:
     US30: 5.0
     USTECH100: 5.0
     default: 0.50
-  tp_mode: "structured"   # Options: "structured", "infinite", "dynamic"
+  tp_mode: "fixed_rr"   # Options: "structured", "infinite", "dynamic", "fixed_rr"
+  risk_reward_ratio: 3.0 # Core RR Target
   news_blocked_times: [] # Format: "2025-12-25 14:00"
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
-    - { low: "H1", high: "H4", label: "DAY" }
-    # - { low: "M5", high: "M15", label: "SCALP_TEST" } # Disabled for production
+    - { low: "H1", high: "H4", label: "DAY" }  # Dsabled for production
 
 telegram:
   enabled: true

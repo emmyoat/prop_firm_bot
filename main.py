@@ -26,7 +26,7 @@ def main():
 
     # Setup Logging
     config = load_config(args.config)
-    log_file = f"bot_{config['system']['magic_number']}.log"
+    log_file = f"bot_{config['system']['magic_number']}_new.log"
     logger = setup_logger(log_level=config['system']['log_level'], log_file=log_file)
     logger.info(f"Starting Prop-Firm Bot with config: {args.config} and env: {args.env}")
 
@@ -78,13 +78,29 @@ def main():
     logger.info("Bot Initialized. Entering Main Loop...")
 
     try:
+        consecutive_failures = 0
         while True:
+            # Add a small delay to prevent saturating MT5 API
+            time.sleep(1)
+            
             # Refresh account info for risk monitoring
             acc_info = mt5.account_info()
             if not acc_info:
-                logger.error("Failed to fetch account info. Retrying...")
-                time.sleep(5)
+                consecutive_failures += 1
+                logger.error(f"Failed to fetch account info (Attempt {consecutive_failures}). Retrying...")
+                
+                if consecutive_failures >= 3:
+                    logger.warning("Multiple failures detected. Attempting to reconnect MT5...")
+                    if data_loader.connect(creds):
+                        consecutive_failures = 0 # Reset on success
+                    else:
+                        logger.error("Reconnection failed. Waiting longer...")
+                        time.sleep(30)
+                else:
+                    time.sleep(5)
                 continue
+            
+            consecutive_failures = 0 # Reset on success
 
             # Update High-Water Mark and check for breaches
             risk_manager.update_high_water_mark(acc_info.equity)
@@ -152,10 +168,32 @@ def main():
                     symbol_info = mt5.symbol_info(symbol) # Move up for shared use
 
                     if positions and symbol_info:
-                        # Trailing Stop & Breakeven
+                        # Check for existing open positions for this bot to preventing stacking
+                        bot_positions = [p for p in positions if p.magic == config['system']['magic_number']]
+                        if len(bot_positions) > 0:
+                            # We already have a trade. Manage it (Trailing/BE) but DO NOT look for new entries.
+                            # Run management logic below, then 'continue' to skip Strategy Loop
+                            pass
+                        else:
+                            # No bot positions, so we mark to allow entry later?
+                            # Actually, we need to run management code for existing trades (even if we don't own them? No, only ours)
+                            pass
+
+                    # --- MANAGEMENT LOGIC (Trailing & Scaling) ---
+                    # Logic needs to iterate positions regardless.
+                    # Redesign: Iterating positions is fine.
+                    # But we must BLOCK the Strategy Entry loop if we have a position.
+                    
+                    has_open_position = False
+                    if positions:
+                        for pos in positions:
+                            if pos.magic == config['system']['magic_number']:
+                                has_open_position = True
+                                # ... existing management logic checks ...
                         trail_start_pips = config['risk'].get('trailing_stop_activation_pips', 45)
                         be_start_pips = config['risk'].get('breakeven_activation_pips', 20)
-                        trail_step_pips = config['risk'].get('trailing_step_pips', 5)
+                        trail_dist_pips = config['risk'].get('trailing_stop_distance_pips', 25)
+                        trail_step_pips = config['risk'].get('trailing_update_step_pips', 5)
                         min_duration = config['risk'].get('min_trade_duration_seconds', 240)
                         point = symbol_info.point
                         
@@ -182,10 +220,13 @@ def main():
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    # Trail: SL = Current - Trailing Step (Distance)
-                                    trail_dist_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
+                                    # Trail: SL = Current - Trailing Distance
+                                    trail_dist_points = (trail_dist_pips * 10 * point) if pip_factor == 10 else (trail_dist_pips * point)
+                                    step_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
                                     new_sl = current_bid - trail_dist_points
-                                    if new_sl > pos.sl:
+                                    
+                                    # Anti-Spam Step Logic: Only modify if new_sl is > current SL + step
+                                    if new_sl > (pos.sl + step_points):
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)
                             
                             elif pos.type == mt5.ORDER_TYPE_SELL:
@@ -208,14 +249,22 @@ def main():
 
                                 # Trailing Check
                                 if profit_pips >= trail_start_pips:
-                                    trail_dist_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
+                                    trail_dist_points = (trail_dist_pips * 10 * point) if pip_factor == 10 else (trail_dist_pips * point)
+                                    step_points = (trail_step_pips * 10 * point) if pip_factor == 10 else (trail_step_pips * point)
                                     new_sl = current_ask + trail_dist_points
-                                    if pos.sl == 0 or new_sl < pos.sl:
+                                    
+                                    # Anti-Spam Step Logic: Only modify if new_sl is < current SL - step
+                                    # Or if SL is 0 (first set)
+                                    if pos.sl == 0 or new_sl < (pos.sl - step_points):
                                         execution_engine.modify_order(pos.ticket, sl=new_sl, tp=pos.tp)
 
 
 
                     # --- STRATEGY LOGIC LOOP ---
+                    if has_open_position:
+                         # logger.debug(f"Skipping {symbol} - Open Position exists.")
+                         continue
+
                     for pair in active_pairs:
                         tf_low = pair['low']
                         tf_high = pair['high']
@@ -244,19 +293,43 @@ def main():
                             if not acc_info:
                                 continue
 
-                            # Risk Calculation
+                            # Get Actual Loss Per 1 Lot (The most reliable way across brokers)
+                            # We simulate a 1-lot order and calc profit at the SL price
                             sl_dist = abs(signal.price - signal.sl_price)
-                            # Ensure we don't have a zero SL
-                            if sl_dist == 0: sl_dist = 100 * symbol_info.point
+                            if sl_dist == 0: sl_dist = symbol_info.point * 100
                             
+                            order_type_calc = mt5.ORDER_TYPE_BUY if signal.signal_type == models.SignalType.BUY else mt5.ORDER_TYPE_SELL
+                            # Use signal.price as the entry for calculation
+                            price_entry = signal.price
+                            loss_per_lot = mt5.order_calc_profit(order_type_calc, symbol, 1.0, price_entry, signal.sl_price)
+                            
+                            # Note: Profit will be negative for a loss, so we take absolute
+                            if loss_per_lot is not None:
+                                loss_per_lot = abs(loss_per_lot)
+                            else:
+                                # Fallback if API fails
+                                loss_per_lot = (sl_dist / symbol_info.trade_tick_size) * symbol_info.trade_tick_value
+
                             base_lot = risk_manager.calculate_lot_size(
                                 acc_info.equity, 
                                 sl_dist, 
                                 symbol_info.trade_tick_value, 
-                                symbol_info.trade_tick_size
+                                symbol_info.trade_tick_size,
+                                loss_per_lot_override=loss_per_lot
                             )
                             
                             if base_lot > 0:
+                                # Check for EXISTING PENDING ORDERS to prevent spam (Duplicate Stop Orders)
+                                existing_orders = mt5.orders_get(symbol=symbol)
+                                if existing_orders:
+                                    # Filter for our bot's orders
+                                    bot_orders = [o for o in existing_orders if o.magic == config['system']['magic_number']]
+                                    if len(bot_orders) > 0:
+                                        # logic: if we already have a pending order, don't place another.
+                                        # Or better: if price is different? For now, simple block.
+                                        # logger.debug(f"Skipping {symbol} - Pending Order already exists.")
+                                        continue
+
                                 tick_info = mt5.symbol_info_tick(symbol)
                                 if not tick_info:
                                     logger.warning(f"Could not fetch tick for {symbol}")
@@ -270,34 +343,40 @@ def main():
                                 order_type = mt5.ORDER_TYPE_BUY if signal.signal_type == models.SignalType.BUY else mt5.ORDER_TYPE_SELL
                                 price = tick_info.ask if order_type == mt5.ORDER_TYPE_BUY else tick_info.bid
                                 
-                                # ROI Check
-                                try:
-                                    margin = mt5.order_calc_margin(order_type, symbol, base_lot, price)
-                                    if signal.tp_price > 0:
-                                        potential_profit = mt5.order_calc_profit(order_type, symbol, base_lot, price, signal.tp_price)
-                                        if margin and potential_profit:
-                                            roi_ratio = potential_profit / margin
-                                            if roi_ratio < 0.30:
-                                                logger.warning(f"Trade Skipped [{label}]: Low ROI {roi_ratio*100:.1f}%")
-                                                continue 
-                                except Exception as e:
-                                    logger.error(f"Error calculating ROI: {e}")
-                                    continue
+                                # ROI Check - DISABLED (Causing issues with Indices margin calc)
+                                #try:
+                                #    margin = mt5.order_calc_margin(order_type, symbol, base_lot, price)
+                                #    if signal.tp_price > 0:
+                                #        potential_profit = mt5.order_calc_profit(order_type, symbol, base_lot, price, signal.tp_price)
+                                #        if margin and potential_profit:
+                                #            roi_ratio = potential_profit / margin
+                                #            if roi_ratio < 0.30:
+                                #                logger.warning(f"Trade Skipped [{label}]: Low ROI {roi_ratio*100:.1f}%")
+                                #                continue 
+                                #except Exception as e:
+                                #    logger.error(f"Error calculating ROI: {e}")
+                                #    continue
 
                                 if not config['system']['dry_run']:
                                     if signal.is_limit_order:
                                         limit_type = mt5.ORDER_TYPE_BUY_LIMIT if order_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_SELL_LIMIT
                                         execution_engine.place_limit_order(
-                                            symbol, base_lot, limit_type, price=signal.price, sl=signal.sl_price, tp=signal.tp_price
+                                            symbol, base_lot, limit_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price
                                         )
                                         logger.info(f"Placed {label} LIMIT Order")
+                                    elif signal.is_stop_order:
+                                        stop_type = mt5.ORDER_TYPE_BUY_STOP if order_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_SELL_STOP
+                                        execution_engine.place_stop_order(
+                                            symbol, base_lot, stop_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price
+                                        )
+                                        logger.info(f"Placed {label} STOP Order")
                                     else:
                                         execution_engine.place_market_order(
-                                            symbol, base_lot, order_type, sl=signal.sl_price, tp=signal.tp_price
+                                            symbol, base_lot, order_type, stop_loss=signal.sl_price, take_profit=signal.tp_price
                                         )
                                         logger.info(f"Placed {label} MARKET Order")
                                 else:
-                                    type_str = "LIMIT" if signal.is_limit_order else "MARKET"
+                                    type_str = "LIMIT" if signal.is_limit_order else ("STOP" if signal.is_stop_order else "MARKET")
                                     logger.info(f"[DRY RUN] Would Place {label} {type_str} {base_lot} Lot at {signal.price}")
                             else:
                                 logger.warning(f"[{label}] Risk too high or invalid SL distance")
@@ -313,7 +392,7 @@ def main():
                 
                 # Snapshot Data
                 acc = mt5.account_info()
-                daily_stats = stats_reporter.get_stats(days=1)
+                daily_stats = stats_reporter.get_stats(since_midnight=True)
                 dd_metrics = risk_manager.get_drawdown_metrics(acc.equity if acc else 0.0)
                 
                 # Active Trades List
@@ -337,6 +416,7 @@ def main():
                     "bot_id": str(config['system']['magic_number']),
                     "account_name": acc.name if acc else "Unknown",
                     "last_updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "currency": acc.currency if acc else "USD", # Add Currency Support
                     "balance": acc.balance if acc else 0.0,
                     "equity": acc.equity if acc else 0.0,
                     "daily_pnl": daily_stats.get('profit', 0.0) if daily_stats else 0.0,
@@ -365,7 +445,7 @@ def main():
                             timeout=5
                         )
                         if resp.status_code == 200:
-                            logger.info("Cloud Dashboard Updated")
+                            logger.debug("Cloud Dashboard Updated")
                         else:
                             logger.warning(f"Cloud update failed: {resp.status_code}")
                     except Exception as cloud_err:

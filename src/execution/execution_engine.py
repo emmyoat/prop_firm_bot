@@ -57,7 +57,22 @@ class ExecutionEngine:
         
         if self.notifier:
             side = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
-            msg = f"🚀 **Trade Executed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {result.price}\nSL: {stop_loss}\nTP: {take_profit}"
+            
+            # Calculate Estimated Risk in Account Currency
+            risk_msg = ""
+            try:
+                sym_info = mt5.symbol_info(symbol)
+                acc = mt5.account_info()
+                currency = acc.currency if acc else "$"
+                
+                if sym_info and stop_loss > 0:
+                    dist = abs(result.price - stop_loss)
+                    risk_monetary = (dist / sym_info.trade_tick_size) * sym_info.trade_tick_value * volume
+                    risk_msg = f"\nRisk: {currency}{risk_monetary:.2f}"
+            except:
+                risk_msg = ""
+
+            msg = f"🚀 **Trade Executed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {result.price}\nSL: {stop_loss}\nTP: {take_profit}{risk_msg}"
             self.notifier.send_message(msg)
             
         return True
@@ -95,7 +110,9 @@ class ExecutionEngine:
             return False
             
         if self.notifier:
-            msg = f"🔒 **Position Closed**\nTicket: {ticket}\nprofit: {result.profit}"
+            acc = mt5.account_info()
+            currency = acc.currency if acc else "$"
+            msg = f"🔒 **Position Closed**\nTicket: {ticket}\nProfit: {currency}{result.profit:.2f}"
             self.notifier.send_message(msg)
 
         return True
@@ -136,7 +153,84 @@ class ExecutionEngine:
         
         if self.notifier:
              side = "BUY LIMIT" if order_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL LIMIT"
-             msg = f"⏳ **Limit Order Placed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {price}\nSL: {stop_loss}"
+             
+             # Calculate Estimated Risk in Account Currency
+             risk_msg = ""
+             try:
+                 sym_info = mt5.symbol_info(symbol)
+                 acc = mt5.account_info()
+                 currency = acc.currency if acc else "$"
+                 
+                 if sym_info and stop_loss > 0:
+                     dist = abs(price - stop_loss)
+                     risk_monetary = (dist / sym_info.trade_tick_size) * sym_info.trade_tick_value * volume
+                     risk_msg = f"\nRisk: {currency}{risk_monetary:.2f}"
+             except:
+                 risk_msg = ""
+
+             msg = f"⏳ **Limit Order Placed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {price}\nSL: {stop_loss}{risk_msg}"
+             self.notifier.send_message(msg)
+
+        return True
+
+    def place_stop_order(self, symbol: str, volume: float, order_type: int, price: float, stop_loss: float = 0.0, take_profit: float = 0.0, expiration_hours: int = 4) -> bool:
+        """
+        Places a pending STOP order (BUY STOP or SELL STOP).
+        Used for breakouts or confirmations.
+        Expiration: 4 hours (default) to keep book clean.
+        """
+        if not mt5.symbol_select(symbol, True):
+            return False
+            
+        import time
+        expiration_time = int(time.time() + (expiration_hours * 3600))
+
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": price,
+            "sl": stop_loss,
+            "tp": take_profit,
+            "magic": self.magic_number,
+            "comment": "PropBot Stop",
+            "type_time": mt5.ORDER_TIME_SPECIFIED, # Expires at specific time
+            "expiration": expiration_time,
+            "type_filling": mt5.ORDER_FILLING_RETURN, 
+        }
+
+        logger.info(f"Sending Stop Order: {request}")
+        result = mt5.order_send(request)
+        
+        if result is None:
+            logger.error("Stop Order send failed (Unknown)")
+            return False
+            
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.error(f"Stop Order failed: {result.retcode} - {result.comment}")
+            return False
+            
+        logger.info(f"Stop Order Placed: {result.order}")
+        
+        if self.notifier:
+             side = "BUY STOP" if order_type == mt5.ORDER_TYPE_BUY_STOP else "SELL STOP"
+             
+             # Calculate Estimated Risk in Account Currency
+             risk_msg = ""
+             try:
+                 sym_info = mt5.symbol_info(symbol)
+                 acc = mt5.account_info()
+                 currency = acc.currency if acc else "$"
+                 
+                 if sym_info and stop_loss > 0:
+                     dist = abs(price - stop_loss)
+                     risk_monetary = (dist / sym_info.trade_tick_size) * sym_info.trade_tick_value * volume
+                     risk_msg = f"\nRisk: {currency}{risk_monetary:.2f}"
+             except:
+                 risk_msg = ""
+
+             msg = f"⏳ **Stop Order Placed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {price}\nSL: {stop_loss}{risk_msg}"
              self.notifier.send_message(msg)
 
         return True

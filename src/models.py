@@ -15,6 +15,7 @@ class Signal:
     sl_price: float # Price level for Stop Loss
     tp_price: float # Price level for Take Profit
     is_limit_order: bool = False
+    is_stop_order: bool = False
     comment: str = ""
 
 @dataclass

@@ -53,7 +53,8 @@ class LiquidityWickStrategy(Strategy):
         if liquidity_level is None:
              return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "No recent liquidity found")
         
-        logger.debug(f"DEBUG: {symbol} Trend {current_trend}. Liquidity Level: {liquidity_level}")
+        logger.info(f"DEBUG: {symbol} Trend is {current_trend}. Checking for {current_trend} setups...")
+        # logger.debug(f"DEBUG: {symbol} Trend {current_trend}. Liquidity Level: {liquidity_level}")
 
         # 3. Check for Sweep (Wick)
         last_candle = df_entry.iloc[-1]
@@ -91,11 +92,15 @@ class LiquidityWickStrategy(Strategy):
                 # Filter: Strong Body (Momentum)
                 body = last_candle['close'] - last_candle['open']
                 total = last_candle['high'] - last_candle['low']
-                if total > 0 and (body / total) > 0.50: # Body is >50% of candle
+                if total > 0 and (body / total) >= 0.50: # Body is >= 50% of candle
                     signal_type = SignalType.BUY
                     stop_loss = last_candle['low'] # SL below breakout candle
                     price = last_candle['close']
                     # Breakouts are immediate market entries
+                else:
+                     logger.info(f"DEBUG: {symbol} Buy-Breakout: Weak Body {(body/total):.2f} < 0.50")
+            else:
+                 logger.info(f"DEBUG: {symbol} No Buy Setup (Close {last_candle['close']:.2f} !> Res {resistance_level:.2f})")
         
         elif current_trend == SignalType.SELL:
             # 1. SWEEP SELL (Reversal at Highs)
@@ -121,7 +126,7 @@ class LiquidityWickStrategy(Strategy):
                 # Filter: Strong Body
                 body = last_candle['open'] - last_candle['close']
                 total = last_candle['high'] - last_candle['low']
-                if total > 0 and (body / total) > 0.50:
+                if total > 0 and (body / total) >= 0.50:
                     signal_type = SignalType.SELL
                     stop_loss = last_candle['high']
                     price = last_candle['close']
@@ -131,44 +136,26 @@ class LiquidityWickStrategy(Strategy):
                  logger.info(f"DEBUG: {symbol} No Sell Setup (Close {last_candle['close']:.2f} !< Supp {support_level:.2f})")
 
         if signal_type != SignalType.NEUTRAL:
-            # DECISION: Market vs Limit Entry
-            # "Confirmation is key to decide".
-            # Logic: 
-            # 1. If the candle closed VERY STRONG (Near the extreme, i.e., small entry wick), use MARKET.
-            # 2. If the candle is a PINBAR (Long rejection wick, small body), use LIMIT (50% Retrace).
+            # VALIDATION: Use STOP ORDERS to confirm breakout.
+            # Instead of entering at Market, we place a STOP order at the wick extreme.
             
-            # We already calculated 'wick' (rejection side).
-            # Let's verify the "Strength" of the move back into range.
-            # Ratio: Wick / Total Range.
-            # If Wick Ratio > 0.6 (Mostly Wick), it's a "Rejection" -> Expect Retrace -> Limit.
-            # If Wick Ratio <= 0.6 (Strong Body), it's a "Momentum" -> Expect Continued Move -> Market.
-            
+            is_stop_order = True
             is_limit = False
             
-            # Recalculate ratios for valid entry
-            # (Logic was inside the IFs above, we need to extract the chosen price/type)
-            # Simplified: The loop above set 'signal_type', 'stop_loss', and potentially 'limit_price'.
-            # We need to refine the 'price' determination here.
-            
-            # Re-evaluating the last candle properties for the chosen signal type
             last_candle = df_entry.iloc[-1]
-            total_range = last_candle['high'] - last_candle['low']
             
-            wick_ratio = 0.0
+            # Risk Friendly SL: Add Buffer based on symbol
+            sl_buffers = self.config['strategy'].get('sl_buffer_map', {})
+            sl_buffer_price = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
+            
             if signal_type == SignalType.BUY:
-                wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
-                wick_ratio = wick / total_range if total_range > 0 else 0
+                 # Buy Stop at High of signal candle + Buffer
+                 price = last_candle['high'] + sl_buffer_price
+                 stop_loss = last_candle['low'] - sl_buffer_price
             else:
-                wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
-                wick_ratio = wick / total_range if total_range > 0 else 0
-            
-            if wick_ratio > 0.60:
-                is_limit = True # Use the calculated limit price from above
-                # Price was already set to limit_price in the block above? 
-                # Yes, I set "price = limit_price" in previous edits.
-            else:
-                is_limit = False
-                price = last_candle['close'] # Reset to Market Price
+                 # Sell Stop at Low of signal candle - Buffer
+                 price = last_candle['low'] - sl_buffer_price
+                 stop_loss = last_candle['high'] + sl_buffer_price
             
             # 4. RSI Filter (Optimization for Higher Win Rate)
             rsi_period = self.config['strategy'].get('rsi_period', 14)
@@ -189,14 +176,6 @@ class LiquidityWickStrategy(Strategy):
                      logger.info(f"DEBUG: {symbol} Skipping SELL - RSI too low ({rsi_value:.1f} < {self.rsi_sell_threshold})")
                      return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too low: {rsi_value:.1f}")
 
-            # Risk Friendly SL: Add Buffer based on symbol
-            sl_buffers = self.config['strategy'].get('sl_buffer_map', {})
-            sl_buffer_price = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
-            
-            if signal_type == SignalType.BUY:
-                 stop_loss -= sl_buffer_price
-            else:
-                 stop_loss += sl_buffer_price
 
             # Define Take Profit (Targeting recent structure with Cap)
             tp_price = self._find_target(df_entry, signal_type, price, stop_loss)
@@ -207,7 +186,7 @@ class LiquidityWickStrategy(Strategy):
             reward = abs(tp_price - price)
             rr_ratio = reward / risk if risk > 0 else 0
 
-            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_limit_order=is_limit, comment=f"Liquidity Wick Sweep (R:R {rr_ratio:.2f})")
+            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_limit_order=is_limit, is_stop_order=is_stop_order, comment=f"Liquidity Wick Sweep (R:R {rr_ratio:.2f})")
 
         return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0)
 
@@ -281,6 +260,13 @@ class LiquidityWickStrategy(Strategy):
         # Check for Infinite TP (Runner Mode)
         if self.config['strategy'].get('infinite_tp', False):
             return 0.0 # No TP, let Trail Stop handle it
+
+        if self.config['strategy'].get('tp_mode') == 'fixed_rr':
+            rr = self.config['strategy'].get('risk_reward_ratio', 3.0)
+            if signal_type == SignalType.BUY:
+                return entry_price + (risk * rr)
+            else:
+                return entry_price - (risk * rr)
 
         if signal_type == SignalType.BUY:
             # 1. Structural

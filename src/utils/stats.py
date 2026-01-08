@@ -8,16 +8,19 @@ class StatsReporter:
     def __init__(self, magic_number: int):
         self.magic_number = magic_number
 
-    def get_stats(self, days: int = 0) -> dict:
+    def get_stats(self, days: int = 0, since_midnight: bool = False) -> dict:
         """
-        Calculates stats for the last 'days'. 
-        If days=0, calculates for 'All Time' (or sensible limit like 30 days).
-        Returns dict with: total_trades, wins, losses, win_rate, profit, equity, balance.
+        Calculates stats.
+        days > 0: Rolling window (e.g., last 24h).
+        since_midnight=True: From 00:00 today (overrides days).
+        days=0: All Time.
         """
         now = datetime.now()
         
         # Determine FROM date
-        if days > 0:
+        if since_midnight:
+             from_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif days > 0:
             from_date = now - timedelta(days=days)
         else:
             from_date = datetime(2020, 1, 1) # Arbitrary start for "All Time"
@@ -25,7 +28,9 @@ class StatsReporter:
         # Fetch History
         # We want 'Deals' (actual executions), filtering by ENTRY_OUT (Closures)
         try:
-            deals = mt5.history_deals_get(from_date, now, group="*")
+            # FIX: Add buffer to 'to_date' to account for Server Time being ahead of Local Time
+            to_date = now + timedelta(days=1)
+            deals = mt5.history_deals_get(from_date, to_date, group="*")
         except Exception as e:
             logger.error(f"Failed to fetch history: {e}")
             return None
@@ -71,20 +76,22 @@ class StatsReporter:
         acc = mt5.account_info()
         balance = acc.balance if acc else 0.0
         equity = acc.equity if acc else 0.0
+        # Get Currency Symbol (or Code)
+        currency = acc.currency if acc else "$"
         
         report = (
             f"📊 **Performance Report**\n"
             f"------------------------\n"
-            f"💰 Balance: ${balance:.2f} | Equity: ${equity:.2f}\n"
+            f"💰 Balance: {currency}{balance:.2f} | Equity: {currency}{equity:.2f}\n"
             f"\n"
             f"📅 **Today**\n"
             f"Trades: {daily['trades']} (W: {daily['wins']} | L: {daily['losses']})\n"
             f"Win Rate: {daily['win_rate']:.1f}%\n"
-            f"PnL: ${daily['profit']:.2f}\n"
+            f"PnL: {currency}{daily['profit']:.2f}\n"
             f"\n"
             f"📈 **Total (All Time)**\n"
             f"Trades: {total['trades']}\n"
             f"Win Rate: {total['win_rate']:.1f}%\n"
-            f"PnL: ${total['profit']:.2f}\n"
+            f"PnL: {currency}{total['profit']:.2f}\n"
         )
         return report

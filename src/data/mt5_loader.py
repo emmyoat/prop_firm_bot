@@ -15,10 +15,12 @@ class MT5DataLoader:
         """
         Initializes the MT5 connection.
         """
+        # Ensure we start fresh if already initialized
+        mt5.shutdown()
+        
         path = self.config['system'].get('mt5_path')
-        if not mt5.initialize(path=path) if path else mt5.initialize():
+        if not (mt5.initialize(path=path) if path else mt5.initialize()):
             logger.error(f"MT5 initialization failed: {mt5.last_error()}")
-            mt5.shutdown()
             return False
 
         # Attempt to login if credentials provided
@@ -35,6 +37,13 @@ class MT5DataLoader:
         logger.info("MT5 Connected Successfully")
         self.connected = True
         return True
+
+    def is_connected(self):
+        """Checks if both the class state and the MT5 terminal are connected."""
+        if not self.connected:
+            return False
+        terminal_info = mt5.terminal_info()
+        return terminal_info is not None and terminal_info.connected
 
     def get_timeframe_constant(self, tf_str):
         """Converts string timeframe to MT5 constant"""

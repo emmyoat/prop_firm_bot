@@ -22,7 +22,7 @@ class NewsLoader:
 
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             logger.info("Fetching Economic News...")
             response = requests.get(self.url, headers=headers, timeout=10)
@@ -72,8 +72,8 @@ class NewsLoader:
                 # We need to convert Event Time to Local System Time.
                 
                 current_tz_offset = event_time.utcoffset()
-                # Making it naive (Local Time)
-                local_event_time = event_time.replace(tzinfo=None) 
+                # Making it naive (Local Time) - The CORRECT way to convert to system time
+                local_event_time = event_time.astimezone(None).replace(tzinfo=None)
                 
                 # Block Window (-30 to +30 mins)
                 start_block = local_event_time - timedelta(minutes=30)

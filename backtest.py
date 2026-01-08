@@ -52,6 +52,8 @@ def run_backtest(friday_exit_enabled=True):
                 except: continue
 
             active_trades = []
+            pending_orders = [] # New: Store pending orders
+            closed_trades = []
             closed_trades = []
             pip_unit = 0.1 if "XAU" in symbol else 1.0
             
@@ -67,13 +69,41 @@ def run_backtest(friday_exit_enabled=True):
                     try: curr_time = pd.to_datetime(curr_time)
                     except: continue
                 
-                # Friday Exit Logic
                 if friday_exit_enabled and curr_time.weekday() == 4 and curr_time.hour >= 21:
+                    pending_orders = [] # Clear pending on Friday
                     for t in active_trades[:]:
                         t['pnl'] = (bar['close'] - t['entry']) if t['type'] == 'BUY' else (t['entry'] - bar['close'])
                         closed_trades.append(t)
                         active_trades.remove(t)
                     continue
+
+                # --- 1. Pending Order Management ---
+                # Check if price triggered any pending stop orders
+                for order in pending_orders[:]:
+                    # Expiration check (4 hours = 4 candles for H1, 1 candle for H4?)
+                    # Simplified: timestamp check
+                    if (curr_time - order['placed_time']).total_seconds() > (4 * 3600):
+                        pending_orders.remove(order)
+                        continue
+
+                    triggered = False
+                    if order['type'] == 'BUY_STOP':
+                        if bar['high'] >= order['entry']: # Price crossed up
+                            triggered = True # Trigger at Order Price
+                            # Slippage simulation? Let's assume perfect fill for now
+                    elif order['type'] == 'SELL_STOP':
+                        if bar['low'] <= order['entry']: # Price crossed down
+                            triggered = True
+
+                    if triggered:
+                        # Convert to Active Trade
+                        active_trades.append({
+                            'type': 'BUY' if 'BUY' in order['type'] else 'SELL',
+                            'entry': order['entry'],
+                            'sl': order['sl'],
+                            'tp': order['tp']
+                        })
+                        pending_orders.remove(order)
 
                 # Management
                 trailing_activation = config['risk'].get('trailing_stop_activation_pips', 50) * pip_unit
@@ -90,14 +120,6 @@ def run_backtest(friday_exit_enabled=True):
                         if not exit_price:
                             profit_dist = bar['high'] - t['entry']
                             if profit_dist >= trailing_activation:
-                                # New SL should be: Current Price (High) - Trailing Dist? 
-                                # No, usually "Breakeven" or "Step". 
-                                # Simple logic: If we are X pips up, move SL to (Price - Step)? 
-                                # Std PropBot Logic: Move SL to lock in profit. 
-                                # Let's approximate: If High > Last_High_Mark, move SL up.
-                                # Simplified: If Profit > Activation, SL = Entry + (Profit - Activation)?
-                                # Let's use the explicit "Step" logic.
-                                # Calculate theoretical new SL
                                 new_sl = t['entry'] + (profit_dist - trailing_step) # Very rough
                                 if new_sl > t['sl']: t['sl'] = new_sl
 
@@ -117,12 +139,24 @@ def run_backtest(friday_exit_enabled=True):
                         closed_trades.append(t)
                         active_trades.remove(t)
 
-                # Entry
-                if len(active_trades) == 0:
+                # Entry (Only if no active trades AND no pending orders)
+                if len(active_trades) == 0 and len(pending_orders) == 0:
                     data_map = {"LowTF": df_entry.iloc[:i], "HighTF": df_trend[df_trend.index <= curr_time]}
                     signal = strategy.generate_signal(data_map, symbol)
+                    
                     if signal.signal_type != SignalType.NEUTRAL:
-                        active_trades.append({'type': 'BUY' if signal.signal_type == SignalType.BUY else 'SELL', 'entry': signal.price, 'sl': signal.sl_price, 'tp': signal.tp_price})
+                        # Logic for Stop Orders vs Market
+                        if signal.is_stop_order:
+                            pending_orders.append({
+                                'type': 'BUY_STOP' if signal.signal_type == SignalType.BUY else 'SELL_STOP',
+                                'entry': signal.price,
+                                'sl': signal.sl_price,
+                                'tp': signal.tp_price,
+                                'placed_time': curr_time
+                            })
+                        else:
+                            # Immediate Market Entry (fallback)
+                            active_trades.append({'type': 'BUY' if signal.signal_type == SignalType.BUY else 'SELL', 'entry': signal.price, 'sl': signal.sl_price, 'tp': signal.tp_price})
 
             wins = [t for t in closed_trades if t['pnl'] > 0]
             total_wins += len(wins)

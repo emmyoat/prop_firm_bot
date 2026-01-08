@@ -12,9 +12,13 @@ class RiskConfig:
     max_spread_points: int
     martingale_multiplier: float
     profit_target_daily_pct: float
+    max_lot_size: Optional[float] = 5.0
+    spread_limit_map: Optional[dict] = None # New map
     trailing_stop_activation_pips: Optional[int] = 50
     breakeven_activation_pips: Optional[int] = 20
-    trailing_step_pips: Optional[int] = 5
+    trailing_stop_distance_pips: Optional[int] = 25 # Renamed from trailing_step_pips
+    trailing_update_step_pips: Optional[int] = 5    # New logic
+    trailing_step_pips: Optional[int] = None       # Deprecated (kept if config still has it)
     friday_exit_hour: Optional[int] = 21
     min_trade_duration_seconds: Optional[int] = 240
 
@@ -64,13 +68,14 @@ class RiskManager:
         """Calculates current drawdown percentages."""
         # 1. Daily Drawdown (Relative to start of day)
         daily_dd_pct = 0.0
-        if self.daily_starting_equity > 0:
+        # Sanity Check: If current_equity is <= 0.1 (likely disconnect/error), ignore calculation to prevent 100% spike
+        if self.daily_starting_equity > 0 and current_equity > 0.1:
             daily_loss = self.daily_starting_equity - current_equity
             daily_dd_pct = (daily_loss / self.daily_starting_equity) * 100.0
 
         # 2. Overall Trailing Drawdown (Relative to HWM)
         overall_dd_pct = 0.0
-        if self.high_water_mark > 0:
+        if self.high_water_mark > 0 and current_equity > 0.1:
             overall_loss = self.high_water_mark - current_equity
             overall_dd_pct = (overall_loss / self.high_water_mark) * 100.0
 
@@ -116,25 +121,40 @@ class RiskManager:
             return False
 
         # 3. Check Spread
-        if spread_points > self.config.max_spread_points:
-            logger.warning(f"Spread too high: {spread_points} > {self.config.max_spread_points}")
+        # 3. Check Spread
+        # Look for specific limit, otherwise use default
+        limit_map = self.config.spread_limit_map if self.config.spread_limit_map else {}
+        # Try exact match, then default
+        max_spread = limit_map.get(symbol_info.name, self.config.max_spread_points)
+        # Fallback partial match for indices (e.g. "US30+" matches "US30")
+        if symbol_info.name not in limit_map:
+             for key in limit_map:
+                 if key in symbol_info.name:
+                     max_spread = limit_map[key]
+                     break
+
+        if spread_points > max_spread:
+            logger.warning(f"Spread too high for {symbol_info.name}: {spread_points} > {max_spread}")
             return False
 
         return True
 
-    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float) -> float:
+    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float, loss_per_lot_override: float = None) -> float:
         """
         Calculates dynamic lot size based on risk percentage.
-        Formula: RiskAmount / ((StopLossDistance / TickSize) * TickValue)
+        Formula: RiskAmount / LossPerLot
         """
         if stop_loss_dist <= 0:
             return 0.0
             
         risk_amount = account_balance * (self.config.account_equity_risk_pct / 100.0)
         
-        # Loss per 1 lot if SL hit = (Distance / TickSize) * TickValue
-        # This is the most accurate formula for MT5 across all assets
-        loss_per_lot = (stop_loss_dist / tick_size) * tick_value
+        # Determine Loss Per 1 Lot
+        if loss_per_lot_override is not None and loss_per_lot_override > 0:
+            loss_per_lot = loss_per_lot_override
+        else:
+            # Fallback formula: (Distance / TickSize) * TickValue
+            loss_per_lot = (stop_loss_dist / tick_size) * tick_value
         
         if loss_per_lot <= 0:
             return 0.0
@@ -147,6 +167,13 @@ class RiskManager:
         if lot_size < 0.01: 
             return 0.0
             
+        # Hard Cap Max Lot Size
+        max_lot = self.config.max_lot_size if self.config.max_lot_size else 10.0
+        if lot_size > max_lot:
+             logger.warning(f"Calculated Lot {lot_size} exceeds safety cap. Using Max: {max_lot}")
+             lot_size = max_lot
+             
+        logger.info(f"Risk Logic: Risking ${risk_amount:.2f} | Loss per Lot: ${loss_per_lot:.2f} | Final Lot: {lot_size}")
         return lot_size
 
 from math import floor

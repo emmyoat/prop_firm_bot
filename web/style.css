@@ -37,6 +37,16 @@ h1 {
     gap: 0.75rem;
 }
 
+h2 {
+    margin-bottom: 1.5rem;
+}
+
+.empty-state {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary);
+}
+
 .kpi-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -168,4 +178,76 @@ header {
 .glass {
     backdrop-filter: blur(10px);
     background: rgba(22, 27, 34, 0.8);
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+}
+
+.account-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 768px) {
+    body {
+        padding: 1rem;
+    }
+
+    header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+
+    /* Adjust the header content wrapper */
+    .header-content {
+        width: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+    }
+
+    .account-switcher {
+        width: 100%;
+        justify-content: space-between;
+    }
+
+    .account-switcher select {
+        flex-grow: 1;
+        text-align: right;
+    }
+
+    .kpi-grid {
+        grid-template-columns: 1fr;
+        /* Full width cards on mobile */
+        gap: 1rem;
+    }
+
+    .card {
+        padding: 1rem;
+    }
+
+    .table-container {
+        overflow-x: auto;
+        /* Enable horizontal scroll for table */
+        -webkit-overflow-scrolling: touch;
+        /* Smooth scrolling on iOS */
+    }
+
+    th,
+    td {
+        white-space: nowrap;
+        /* Prevent text wrapping in table to ensure clean scrolling */
+        padding: 0.75rem;
+    }
+
+    h1 {
+        font-size: 1.5rem;
+    }
 }

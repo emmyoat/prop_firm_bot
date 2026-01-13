@@ -21,6 +21,7 @@ class RiskConfig:
     trailing_step_pips: Optional[int] = None       # Deprecated (kept if config still has it)
     friday_exit_hour: Optional[int] = 21
     min_trade_duration_seconds: Optional[int] = 240
+    symbol_risk_map: Optional[dict] = None
 
 class RiskManager:
     def __init__(self, config: dict):
@@ -139,7 +140,7 @@ class RiskManager:
 
         return True
 
-    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float, loss_per_lot_override: float = None) -> float:
+    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float, loss_per_lot_override: float = None, symbol: str = None) -> float:
         """
         Calculates dynamic lot size based on risk percentage.
         Formula: RiskAmount / LossPerLot
@@ -147,7 +148,13 @@ class RiskManager:
         if stop_loss_dist <= 0:
             return 0.0
             
-        risk_amount = account_balance * (self.config.account_equity_risk_pct / 100.0)
+        # Determine risk percentage for this symbol
+        risk_pct = self.config.account_equity_risk_pct
+        if symbol and self.config.symbol_risk_map and symbol in self.config.symbol_risk_map:
+            risk_pct = self.config.symbol_risk_map[symbol]
+            logger.info(f"Risk Logic: Using Override Risk {risk_pct}% for {symbol}")
+
+        risk_amount = account_balance * (risk_pct / 100.0)
         
         # Determine Loss Per 1 Lot
         if loss_per_lot_override is not None and loss_per_lot_override > 0:

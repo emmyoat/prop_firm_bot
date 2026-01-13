@@ -1,4 +1,5 @@
 import yfinance as yf
+from src.utils.logger import setup_logger
 from src.utils.config_loader import load_config, load_credentials
 from src.data.mt5_loader import MT5DataLoader
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
@@ -6,10 +7,15 @@ from src.models import SignalType
 import pandas as pd
 import numpy as np
 from datetime import datetime
+import logging
 
 def run_backtest(friday_exit_enabled=True):
     config = load_config()
     creds = load_credentials()
+    
+    # Enable logging for strategy debugging
+    setup_logger("PropBot.Strategy", logging.INFO)
+    setup_logger("PropBot.Risk", logging.INFO)
     
     loader = MT5DataLoader(config)
     if not loader.connect(creds):
@@ -19,7 +25,7 @@ def run_backtest(friday_exit_enabled=True):
     active_pairs = config['strategy'].get('active_pairs', [])
     strategy = LiquidityWickStrategy(config)
     
-    ticker_map = {"XAUUSD": "GC=F", "US30": "YM=F", "NAS100": "NQ=F"}
+    ticker_map = {"XAUUSD": "GC=F", "US30": "YM=F", "NAS100": "NQ=F", "USTECH100": "NQ=F"}
 
     mode_str = "FRIDAY EXIT" if friday_exit_enabled else "WEEKEND HOLDING"
     print(f"\n--- {mode_str} BACKTEST ---")
@@ -54,13 +60,24 @@ def run_backtest(friday_exit_enabled=True):
             active_trades = []
             pending_orders = [] # New: Store pending orders
             closed_trades = []
-            closed_trades = []
             pip_unit = 0.1 if "XAU" in symbol else 1.0
             
+            # Filter for Past Week
+            start_date = pd.Timestamp.now() - pd.Timedelta(days=7)
+            # Fetch more for indicators but only trade on the week
+            # Actually we already fetched 2500, let's just filter the loop start
+            
             if df_entry is not None and not df_entry.empty:
+                df_entry.set_index('time', inplace=True, drop=False)
+                print(f"DEBUG: Processing {len(df_entry)} bars for {symbol} {label}...")
                 df_entry.index = pd.to_datetime(df_entry.index)
             if df_trend is not None and not df_trend.empty:
+                df_trend.set_index('time', inplace=True, drop=False)
                 df_trend.index = pd.to_datetime(df_trend.index)
+
+            # Define trading window start
+            trading_start = pd.Timestamp.now() - pd.Timedelta(days=30)
+            print(f"   -> Backtesting from {trading_start} to {pd.Timestamp.now()}")
 
             for i in range(100, len(df_entry)):
                 bar = df_entry.iloc[i]
@@ -68,6 +85,10 @@ def run_backtest(friday_exit_enabled=True):
                 if not isinstance(curr_time, pd.Timestamp):
                     try: curr_time = pd.to_datetime(curr_time)
                     except: continue
+                
+                # Filter trades to only those within the past month
+                if curr_time < trading_start:
+                    continue
                 
                 if friday_exit_enabled and curr_time.weekday() == 4 and curr_time.hour >= 21:
                     pending_orders = [] # Clear pending on Friday
@@ -139,9 +160,14 @@ def run_backtest(friday_exit_enabled=True):
                         closed_trades.append(t)
                         active_trades.remove(t)
 
-                # Entry (Only if no active trades AND no pending orders)
+                if i % 100 == 0:
+                    pass # Progress pulse
                 if len(active_trades) == 0 and len(pending_orders) == 0:
-                    data_map = {"LowTF": df_entry.iloc[:i], "HighTF": df_trend[df_trend.index <= curr_time]}
+                    data_map = {"LowTF": df_entry.iloc[:i+1], "HighTF": df_trend[df_trend.index <= curr_time]}
+                    
+                    if i < 110: # Only debug first 10 trading bars
+                        print(f"   [DEBUG {curr_time}] Entry Bars: {len(data_map['LowTF'])}, Trend Bars: {len(data_map['HighTF'])}")
+                    
                     signal = strategy.generate_signal(data_map, symbol)
                     
                     if signal.signal_type != SignalType.NEUTRAL:
@@ -161,6 +187,11 @@ def run_backtest(friday_exit_enabled=True):
             wins = [t for t in closed_trades if t['pnl'] > 0]
             total_wins += len(wins)
             total_trades_count += len(closed_trades)
+            if len(closed_trades) > 0:
+                wr_sym = (len(wins) / len(closed_trades)) * 100
+                print(f"   -> {symbol} ({label}): {len(closed_trades)} Trades | {wr_sym:.1f}% WR")
+            else:
+                print(f"   -> {symbol} ({label}): No trades found in this period.")
             
     if total_trades_count > 0:
         wr = (total_wins / total_trades_count) * 100

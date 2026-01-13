@@ -144,22 +144,36 @@ class LiquidityWickStrategy(Strategy):
             
             last_candle = df_entry.iloc[-1]
             
-            # Risk Friendly SL: Add Buffer based on symbol
+            # --- VOLATILITY-BASED RISK (ATR) ---
+            atr_multiplier = self.config['strategy'].get('atr_multiplier', 1.5)
+            entry_multiplier = self.config['strategy'].get('entry_atr_multiplier', 0.1)
+            atr_period = self.config['strategy'].get('atr_period', 14)
+            atr_value = self._calculate_atr(df_entry, atr_period)
+            
+            # SL Buffer (Safety)
             sl_buffers = self.config['strategy'].get('sl_buffer_map', {})
-            sl_buffer_price = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
+            fallback_buffer = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
+            
+            sl_buffer_price = atr_value * atr_multiplier if (atr_value and not pd.isna(atr_value)) else fallback_buffer
+            sl_buffer_price = max(sl_buffer_price, fallback_buffer)
+
+            # Entry Buffer (Tighter confirmations)
+            entry_buffer_price = atr_value * entry_multiplier if (atr_value and not pd.isna(atr_value)) else (fallback_buffer * 0.2)
+            
+            logger.info(f"DEBUG: {symbol} SL Buffer: {sl_buffer_price:.2f} | Entry Buffer: {entry_buffer_price:.2f} (ATR: {atr_value if not pd.isna(atr_value) else 'NaN'})")
             
             if signal_type == SignalType.BUY:
-                 # Buy Stop at High of signal candle + Buffer
-                 price = last_candle['high'] + sl_buffer_price
+                 # Buy Stop at High of signal candle + Small Entry Buffer
+                 price = last_candle['high'] + entry_buffer_price
                  stop_loss = last_candle['low'] - sl_buffer_price
             else:
-                 # Sell Stop at Low of signal candle - Buffer
-                 price = last_candle['low'] - sl_buffer_price
+                 # Sell Stop at Low of signal candle - Small Entry Buffer
+                 price = last_candle['low'] - entry_buffer_price
                  stop_loss = last_candle['high'] + sl_buffer_price
             
             # 4. RSI Filter (Optimization for Higher Win Rate)
             rsi_period = self.config['strategy'].get('rsi_period', 14)
-            rsi_value = self._calculate_rsi(df_entry, rsi_period)
+            rsi_value = self._calculate_rsi(df_entry['close'], rsi_period)
             
             # Simple Filter: If Trend is BUY, we want RSI to be somewhat oversold (pullback)
             # or at least NOT overbought.
@@ -293,12 +307,35 @@ class LiquidityWickStrategy(Strategy):
         
         return 0.0
 
-        return target
-
-    def _calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> float:
-        delta = df['close'].diff()
+    def _calculate_rsi(self, series, period):
+        if len(series) < period + 1:
+            return 50.0 # Neutral fallback
+            
+        delta = series.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        
+        if loss.iloc[-1] == 0:
+            return 100.0 if gain.iloc[-1] > 0 else 50.0
+            
         rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-        return rsi.iloc[-1]
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        return rsi if not pd.isna(rsi) else 50.0
+
+    def _calculate_atr(self, df, period=14):
+        """Calculates Average True Range."""
+        if len(df) < period + 1:
+            return 0.0 # Signal to use fallback
+            
+        high = df['high']
+        low = df['low']
+        prev_close = df['close'].shift(1)
+        
+        tr = pd.concat([
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+        
+        atr = tr.rolling(window=period).mean().iloc[-1]
+        return atr if not pd.isna(atr) else 0.0

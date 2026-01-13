@@ -5,7 +5,7 @@ system:
   log_level: "INFO"
   mt5_path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
   dry_run: false 
-  symbol_list: ["XAUUSD", "US30", "USTECH100"]
+  symbol_list: ["XAUUSD"]
   timeframe: "M15"  # MT5 Timeframe constant name or string
 
 risk:
@@ -28,6 +28,8 @@ risk:
   trailing_update_step_pips: 5      # Only update SL if it moves at least this many pips (Anti-Spam)
   friday_exit_hour: 21              # Close all trades Friday at 21:00
   min_trade_duration_seconds: 240 # Scalping Policy: Min holder time 4 mins
+  symbol_risk_map:
+    XAUUSD: 2.0
 
 strategy:
   ema_period_fast: 50
@@ -41,6 +43,9 @@ strategy:
   rsi_buy_threshold: 70         # Was 55 - higher = less filtering
   rsi_sell_threshold: 30        # Was 35 - lower = less filtering
   sma_period: 40
+  atr_multiplier: 1.5
+  entry_atr_multiplier: 0.1
+  atr_period: 14
   sl_buffer_map:
     XAUUSD: 0.50
     US30: 5.0

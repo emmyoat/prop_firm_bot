@@ -10,6 +10,7 @@ from src.risk.risk_manager import RiskManager
 from src.execution.execution_engine import ExecutionEngine
 from src.utils.notifications import TelegramNotifier 
 from src.utils.stats import StatsReporter
+from src.utils.journal import TradeJournal
 import src.models as models
 import requests
 import os
@@ -75,15 +76,20 @@ def main():
     stats_reporter = StatsReporter(config['system']['magic_number'])
     last_report_time = 0 # Unix timestamp
 
+    # Initialize Journal
+    journal = TradeJournal()
+    active_tickets = set()
+
     logger.info("Bot Initialized. Entering Main Loop...")
+    paused = False
 
     try:
         consecutive_failures = 0
         while True:
             # Add a small delay to prevent saturating MT5 API
             time.sleep(1)
-            
-            # Refresh account info for risk monitoring
+
+            # 1. MT5 Connection & Account Check (MUST BE FIRST)
             acc_info = mt5.account_info()
             if not acc_info:
                 consecutive_failures += 1
@@ -101,6 +107,99 @@ def main():
                 continue
             
             consecutive_failures = 0 # Reset on success
+
+            # 2. Process Telegram Commands
+            if config['telegram']['enabled']:
+                commands = notifier.get_updates()
+                for cmd in commands:
+                    # ... [existing logic omitted for clarity but preserved by tool]
+                    if cmd == "/status":
+                        acc = mt5.account_info()
+                        if acc:
+                            curr_drawdown = (risk_manager.high_water_mark - acc.equity) / risk_manager.high_water_mark * 100
+                            status_msg = (
+                                f"🤖 **Bot Status**\n"
+                                f"Mode: {'🔴 PAUSED' if paused else '🟢 RUNNING'}\n"
+                                f"Equity: {acc.currency}{acc.equity:,.2f}\n"
+                                f"HWM: {acc.currency}{risk_manager.high_water_mark:,.2f}\n"
+                                f"Current Drawdown: {curr_drawdown:.2f}%"
+                            )
+                            notifier.send_message(status_msg)
+                    
+                    elif cmd == "/stats":
+                        daily_stats = stats_reporter.get_stats(days=1)
+                        total_stats = stats_reporter.get_stats(days=0)
+                        if daily_stats and total_stats:
+                            notifier.send_message(stats_reporter.format_report(daily_stats, total_stats))
+                    
+                    elif cmd == "/pause":
+                        paused = True
+                        notifier.send_message("⏸️ **Bot Paused**. No new entries will be taken.")
+                        logger.warning("Bot Paused via Telegram.")
+                    
+                    elif cmd == "/resume":
+                        paused = False
+                        notifier.send_message("▶️ **Bot Resumed**. Strategy scanning active.")
+                        logger.info("Bot Resumed via Telegram.")
+                    
+                    elif cmd == "/closeall":
+                        notifier.send_message("⚠️ **Closing all positions...**")
+                        execution_engine.close_all_positions()
+                        logger.warning("All positions closed via Telegram.")
+                    
+                    elif cmd == "/journal":
+                        if os.path.exists("trades.csv"):
+                            with open("trades.csv", "r") as f:
+                                lines = f.readlines()
+                                if len(lines) > 1:
+                                    last_5 = lines[-5:]
+                                    journal_msg = "📖 **Recent Trades**\n" + "".join(last_5)
+                                    notifier.send_message(journal_msg)
+                                else:
+                                    notifier.send_message("📖 Journal is empty.")
+                        else:
+                            notifier.send_message("📖 No journal found yet. Start trading!")
+
+                    elif cmd in ["/start", "/help"]:
+                        help_msg = (
+                            "👋 **PropBot Command Menu**\n"
+                            "/status - Current health & equity\n"
+                            "/stats - Today's performance\n"
+                            "/journal - View last 5 trades\n"
+                            "/pause - Halt all new entries\n"
+                            "/resume - Start strategy scan\n"
+                            "/closeall - Emergency exit all trades"
+                        )
+                        notifier.send_message(help_msg)
+                    
+                    else:
+                        notifier.send_message(f"❓ Unknown command: {cmd}\nType /help for the menu.")
+            
+            # 3. Monitor Closed Trades for Journaling (Only if connected)
+            current_positions = mt5.positions_get(magic=config['system']['magic_number'])
+            
+            # CRITICAL GUARD: Only update tickets if positions_get didn't return None (which means error)
+            # If it returns empty tuple (), that's fine (no trades).
+            if current_positions is not None:
+                current_tickets = {p.ticket for p in current_positions}
+                
+                closed_tickets = active_tickets - current_tickets
+                for ticket in closed_tickets:
+                    # Fetch history for this ticket to log
+                    from_time = datetime.now() - timedelta(days=1)
+                    to_time = datetime.now() + timedelta(hours=1)
+                    history_deals = mt5.history_deals_get(from_time, to_time, position=ticket)
+                    
+                    if history_deals:
+                        entry_deal = next((d for d in history_deals if d.entry in [mt5.DEAL_ENTRY_IN, mt5.DEAL_ENTRY_INOUT]), None)
+                        exit_deal = next((d for d in history_deals if d.entry in [mt5.DEAL_ENTRY_OUT, mt5.DEAL_ENTRY_OUT_BY]), None)
+                        
+                        if entry_deal and exit_deal:
+                            journal.log_trade(exit_deal, entry_deal)
+                
+                active_tickets = current_tickets
+            else:
+                logger.warning("Journaling: Connection flickered. Skipping closure check to prevent ghost logs.")
 
             # Update High-Water Mark and check for breaches
             risk_manager.update_high_water_mark(acc_info.equity)
@@ -168,7 +267,10 @@ def main():
                     symbol_info = mt5.symbol_info(symbol) # Move up for shared use
 
                     if positions and symbol_info:
-                        # Check for existing open positions for this bot to preventing stacking
+                        if paused:
+                            continue # Skip entry logic if paused
+
+                        # Check if we already have a position for this symbol
                         bot_positions = [p for p in positions if p.magic == config['system']['magic_number']]
                         if len(bot_positions) > 0:
                             # We already have a trade. Manage it (Trailing/BE) but DO NOT look for new entries.
@@ -315,7 +417,8 @@ def main():
                                 sl_dist, 
                                 symbol_info.trade_tick_value, 
                                 symbol_info.trade_tick_size,
-                                loss_per_lot_override=loss_per_lot
+                                loss_per_lot_override=loss_per_lot,
+                                symbol=symbol
                             )
                             
                             if base_lot > 0:
@@ -361,18 +464,21 @@ def main():
                                     if signal.is_limit_order:
                                         limit_type = mt5.ORDER_TYPE_BUY_LIMIT if order_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_SELL_LIMIT
                                         execution_engine.place_limit_order(
-                                            symbol, base_lot, limit_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price
+                                            symbol, base_lot, limit_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price,
+                                            comment=signal.comment
                                         )
                                         logger.info(f"Placed {label} LIMIT Order")
                                     elif signal.is_stop_order:
                                         stop_type = mt5.ORDER_TYPE_BUY_STOP if order_type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_SELL_STOP
                                         execution_engine.place_stop_order(
-                                            symbol, base_lot, stop_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price
+                                            symbol, base_lot, stop_type, price=signal.price, stop_loss=signal.sl_price, take_profit=signal.tp_price,
+                                            comment=signal.comment
                                         )
                                         logger.info(f"Placed {label} STOP Order")
                                     else:
                                         execution_engine.place_market_order(
-                                            symbol, base_lot, order_type, stop_loss=signal.sl_price, take_profit=signal.tp_price
+                                            symbol, base_lot, order_type, stop_loss=signal.sl_price, take_profit=signal.tp_price,
+                                            comment=signal.comment
                                         )
                                         logger.info(f"Placed {label} MARKET Order")
                                 else:

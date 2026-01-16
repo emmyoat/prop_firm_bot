@@ -12,6 +12,7 @@ from src.utils.notifications import TelegramNotifier
 from src.utils.stats import StatsReporter
 from src.utils.journal import TradeJournal
 import src.models as models
+from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
 import requests
 import os
 
@@ -387,6 +388,37 @@ def main():
                         if signal.signal_type != models.SignalType.NEUTRAL:
                             signal.comment = f"{label} {signal.comment}"
                             logger.info(f"Signal Generated [{label}]: {signal}")
+                            
+                            # SMC Confluence Filter
+                            smc_enabled = config['strategy'].get('smc_filter_enabled', False)
+                            smc_min_score = config['strategy'].get('smc_min_confluence_score', 20)
+                            
+                            if smc_enabled and smc_min_score > 0:
+                                try:
+                                    fvgs = detect_fvg_zones(df_low)
+                                    obs = detect_order_blocks(df_low)
+                                    
+                                    confluence_score, smc_zone = calculate_confluence_score(
+                                        current_price=df_low.iloc[-1]['close'],
+                                        signal_type=signal.signal_type.name,
+                                        order_blocks=obs,
+                                        fvg_zones=fvgs,
+                                        entry_price=signal.price,
+                                        stop_loss=signal.sl_price
+                                    )
+                                    
+                                    if confluence_score < smc_min_score:
+                                        logger.info(f"SMC Filter: Skipping {symbol} - Score {confluence_score} < {smc_min_score}")
+                                        continue
+                                    
+                                    # Log SMC zone details
+                                    zone_info = ""
+                                    if smc_zone:
+                                        zone_info = f" OB={smc_zone.has_ob} FVG={smc_zone.has_fvg}"
+                                    logger.info(f"SMC Filter: PASSED - Score {confluence_score}{zone_info}")
+                                    signal.comment = f"{signal.comment} [SMC:{confluence_score}]"
+                                except Exception as smc_err:
+                                    logger.warning(f"SMC Filter error: {smc_err}")
                             
                             # C. Execution - Initial Entry
                             acc_info = mt5.account_info()

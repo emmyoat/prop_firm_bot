@@ -22,10 +22,10 @@ risk:
   martingale_multiplier: 1.0    # 1.0 = No Martingale (Recommended)
   
   # Advanced Management
-  breakeven_activation_pips: 20   # Move SL to Entry when profit > 20 pips
+  breakeven_activation_pips: 50   # Move SL to Entry when profit > 50 pips
   trailing_stop_activation_pips: 50 # Start trailing when profit > 50 pips
   trailing_stop_distance_pips: 25   # Distance of SL from Price (Previous: trailing_step_pips)
-  trailing_update_step_pips: 5      # Only update SL if it moves at least this many pips (Anti-Spam)
+  trailing_update_step_pips: 20      # Only update SL if it moves at least this many pips (Anti-Spam)
   friday_exit_hour: 21              # Close all trades Friday at 21:00
   min_trade_duration_seconds: 240 # Scalping Policy: Min holder time 4 mins
   symbol_risk_map:
@@ -51,12 +51,15 @@ strategy:
     US30: 5.0
     USTECH100: 5.0
     default: 0.50
-  tp_mode: "fixed_rr"   # Options: "structured", "infinite", "dynamic", "fixed_rr"
+  tp_mode: "dynamic"   # Options: "structured", "infinite", "dynamic", "fixed_rr"
   risk_reward_ratio: 3.0 # Core RR Target
   news_blocked_times: [] # Format: "2025-12-25 14:00"
+  # SMC Filter (Order Block + FVG Confluence)
+  smc_filter_enabled: true
+  smc_min_confluence_score: 20  # 0=off, 20=light, 50=strict
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
-    - { low: "H1", high: "H4", label: "DAY" }  # Dsabled for production
+    - { low: "H1", high: "H4", label: "DAY" }  
 
 telegram:
   enabled: true

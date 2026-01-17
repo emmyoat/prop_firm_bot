@@ -21,40 +21,71 @@ def run_backtest(friday_exit_enabled=True):
     if not loader.connect(creds):
         pass
     
+    # symbols = config['system'].get('symbol_list', ["XAUUSD", "US30", "NAS100"])
     symbols = config['system'].get('symbol_list', ["XAUUSD", "US30", "NAS100"])
+    # symbols = ["US30"]
+    # symbols = config['system'].get('symbol_list', ["XAUUSD", "US30", "NAS100"])
     active_pairs = config['strategy'].get('active_pairs', [])
     strategy = LiquidityWickStrategy(config)
     
-    ticker_map = {"XAUUSD": "GC=F", "US30": "YM=F", "NAS100": "NQ=F", "USTECH100": "NQ=F"}
+    # Yahoo Finance ticker mapping
+    ticker_map = {
+        "XAUUSD": "GC=F",      # Gold Futures
+        "US30": "YM=F",        # Dow Jones Futures
+        "NAS100": "NQ=F",      # Nasdaq Futures
+        "USTECH100": "NQ=F",
+    }
 
     mode_str = "FRIDAY EXIT" if friday_exit_enabled else "WEEKEND HOLDING"
     print(f"\n--- {mode_str} BACKTEST ---")
 
+    total_trades = 0
     total_wins = 0
-    total_trades_count = 0
+
+    # Define fetch_bars here, as it's used in the new loop structure
+    fetch_bars = 10000 # Example value, adjust as needed
 
     for symbol in symbols:
-        yf_ticker = ticker_map.get(symbol, "GC=F")
-        for pair in active_pairs:
-            label = pair['label']
-            tf_entry = pair['low']
-            tf_trend = pair['high']
+        yf_ticker = ticker_map.get(symbol, "GC=F") # Keep this for yfinance fallback
+        for tf_data in active_pairs:
+            # Handle config dict vs legacy string
+            if isinstance(tf_data, dict):
+                label = tf_data.get('label', 'UNKNOWN')
+                tf_entry = tf_data.get('low', "H1")
+                tf_trend = tf_data.get('high', "H4")
+            else:
+                label = tf_data
+                tf_entry = "M30" if label == "SCALP" else ("H1" if label == "DAY" else "H4")
+                tf_trend = "H4"  if label == "SCALP" else ("H4" if label == "DAY" else "D1")
+
+            print(f"DEBUG: Processing {fetch_bars} bars for {symbol} {label} ({tf_entry}/{tf_trend})...")
+
+            # --- FETCH DATA ---
+            # Try MT5 first
+            df_entry = loader.fetch_data(symbol, tf_entry, fetch_bars)
+            df_trend = loader.fetch_data(symbol, tf_trend, fetch_bars)
             
-            df_entry = loader.fetch_data(symbol, tf_entry, 2500)
-            df_trend = loader.fetch_data(symbol, tf_trend, 2500)
-            
+            # Fallback to yfinance if MT5 data missing
             if df_entry is None or df_trend is None:
+                yf_ticker = ticker_map.get(symbol)
+                if not yf_ticker:
+                    print(f"Skipping {symbol} - No yfinance mapping")
+                    continue
+                    
                 try:
                     print(f"DEBUG: Downloading data for {symbol}...")
                     tf_map = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "1h", "D1": "1d"} 
-                    df_entry = yf.download(yf_ticker, period="1mo", interval=tf_map.get(tf_entry, "1h"), progress=False)
-                    df_trend = yf.download(yf_ticker, period="3mo", interval=tf_map.get(tf_trend, "1d"), progress=False)
+                    df_entry = yf.download(yf_ticker, period="6mo", interval=tf_map.get(tf_entry, "1h"), progress=False)
+                    df_trend = yf.download(yf_ticker, period="1y", interval=tf_map.get(tf_trend, "1d"), progress=False)
                     print(f"DEBUG: Data downloaded. Entry={len(df_entry)}, Trend={len(df_trend)}")
                     if df_entry.empty: continue
                     df_entry.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_entry.columns]
                     df_trend.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in df_trend.columns]
                     df_entry.index = df_entry.index.tz_localize(None)
                     df_trend.index = df_trend.index.tz_localize(None)
+                    # Add 'time' column from index for compatibility
+                    df_entry['time'] = df_entry.index
+                    df_trend['time'] = df_trend.index
                 except: continue
 
             active_trades = []
@@ -63,20 +94,23 @@ def run_backtest(friday_exit_enabled=True):
             pip_unit = 0.1 if "XAU" in symbol else 1.0
             
             # Filter for Past Week
-            start_date = pd.Timestamp.now() - pd.Timedelta(days=7)
+            start_date = pd.Timestamp.now() - pd.Timedelta(days=180)
             # Fetch more for indicators but only trade on the week
             # Actually we already fetched 2500, let's just filter the loop start
             
             if df_entry is not None and not df_entry.empty:
-                df_entry.set_index('time', inplace=True, drop=False)
-                print(f"DEBUG: Processing {len(df_entry)} bars for {symbol} {label}...")
+                # Only set index if 'time' column exists and index is not already datetime
+                if 'time' in df_entry.columns and not isinstance(df_entry.index, pd.DatetimeIndex):
+                    df_entry.set_index('time', inplace=True, drop=False)
+                # print(f"DEBUG: Processing {len(df_entry)} bars for {symbol} {label}...")
                 df_entry.index = pd.to_datetime(df_entry.index)
             if df_trend is not None and not df_trend.empty:
-                df_trend.set_index('time', inplace=True, drop=False)
+                if 'time' in df_trend.columns and not isinstance(df_trend.index, pd.DatetimeIndex):
+                    df_trend.set_index('time', inplace=True, drop=False)
                 df_trend.index = pd.to_datetime(df_trend.index)
 
             # Define trading window start
-            trading_start = pd.Timestamp.now() - pd.Timedelta(days=30)
+            trading_start = pd.Timestamp.now() - pd.Timedelta(days=180)
             print(f"   -> Backtesting from {trading_start} to {pd.Timestamp.now()}")
 
             for i in range(100, len(df_entry)):
@@ -141,8 +175,8 @@ def run_backtest(friday_exit_enabled=True):
                         if not exit_price:
                             profit_dist = bar['high'] - t['entry']
                             if profit_dist >= trailing_activation:
-                                new_sl = t['entry'] + (profit_dist - trailing_step) # Very rough
-                                if new_sl > t['sl']: t['sl'] = new_sl
+                                 new_sl = t['entry'] + (profit_dist - trailing_step) # Very rough
+                                 if new_sl > t['sl']: t['sl'] = new_sl
 
                     else: # SELL
                         if bar['high'] >= t['sl']: exit_price = t['sl']
@@ -186,25 +220,24 @@ def run_backtest(friday_exit_enabled=True):
 
             wins = [t for t in closed_trades if t['pnl'] > 0]
             total_wins += len(wins)
-            total_trades_count += len(closed_trades)
+            total_trades += len(closed_trades)
             if len(closed_trades) > 0:
                 wr_sym = (len(wins) / len(closed_trades)) * 100
                 print(f"   -> {symbol} ({label}): {len(closed_trades)} Trades | {wr_sym:.1f}% WR")
             else:
                 print(f"   -> {symbol} ({label}): No trades found in this period.")
             
-    if total_trades_count > 0:
-        wr = (total_wins / total_trades_count) * 100
-        print(f"[{mode_str}] Total Trades: {total_trades_count} | Combined Win Rate: {wr:.2f}%")
-        return wr
+    if total_trades > 0:
+        combined_wr = (total_wins / total_trades) * 100
+        print(f"[FRIDAY EXIT] Total Trades: {total_trades} | Combined Win Rate: {combined_wr:.2f}%")
+        return combined_wr
     return 0
 
 if __name__ == "__main__":
-    wr_exit = run_backtest(friday_exit_enabled=True)
-    wr_hold = run_backtest(friday_exit_enabled=False)
+    # Run single 1-month backtest with default settings (Friday Exit = True)
+    wr = run_backtest(friday_exit_enabled=True)
     
     print("\n" + "="*40)
-    print(f"COMPARISON SUMMARY")
-    print(f"Friday Exit Win Rate:    {wr_exit:.2f}%")
-    print(f"Weekend Holding Win Rate: {wr_hold:.2f}%")
+    print(f"6-MONTH BACKTEST SUMMARY")
+    print(f"Win Rate: {wr:.2f}%")
     print("="*40)

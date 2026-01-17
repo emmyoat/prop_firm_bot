@@ -250,8 +250,6 @@ class LiquidityWickStrategy(Strategy):
             
         return None
 
-        return target
-
     def _find_target(self, df: pd.DataFrame, signal_type: SignalType, entry_price: float, sl_price: float = 0.0) -> float:
         """
         Finds the Take Profit target.

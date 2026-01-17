@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PropBot Cloud Dashboard</title>
+    <meta name="description" content="Real-time trading bot monitoring dashboard">
     <link rel="stylesheet" href="style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -15,48 +16,94 @@
     <div class="container">
         <header>
             <div class="header-content">
-                <h1>🤖 PropBot </h1>
+                <h1>🤖 NimiBot</h1>
                 <div class="account-switcher">
                     <span class="account-label">Account:</span>
                     <select id="bot-selector" onchange="window.selectedBotId = this.value; updateUI();">
                         <option value="">Detecting Bots...</option>
                     </select>
                 </div>
+                <div class="connection-status" id="connection-status">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="connection-text">Connecting...</span>
+                </div>
             </div>
-            <div class="last-updated" id="last-updated">Connecting...</div>
+            <div class="last-updated" id="last-updated">--</div>
         </header>
 
         <div class="kpi-grid">
+            <!-- Equity Card -->
             <div class="card">
-                <div class="card-label">Equity</div>
-                <div class="card-value" id="equity">$0.00</div>
-                <div class="card-delta" id="equity-delta">--</div>
+                <div class="card-header">
+                    <div class="card-label">Equity</div>
+                    <div class="card-icon">💰</div>
+                </div>
+                <div class="card-value large positive" id="equity">$0.00</div>
+                <div class="card-delta" id="equity-delta"></div>
             </div>
+
+            <!-- Balance Card -->
             <div class="card">
-                <div class="card-label">Balance</div>
+                <div class="card-header">
+                    <div class="card-label">Balance</div>
+                    <div class="card-icon">📊</div>
+                </div>
                 <div class="card-value" id="balance">$0.00</div>
             </div>
+
+            <!-- Daily PnL Card -->
             <div class="card">
-                <div class="card-label">Daily PnL</div>
+                <div class="card-header">
+                    <div class="card-label">Daily PnL</div>
+                    <div class="card-icon success">📈</div>
+                </div>
                 <div class="card-value" id="daily-pnl">$0.00</div>
             </div>
+
+            <!-- Daily Drawdown Card -->
             <div class="card">
-                <div class="card-label">Daily DD</div>
+                <div class="card-header">
+                    <div class="card-label">Daily Drawdown</div>
+                    <div class="card-icon warning">⚠️</div>
+                </div>
                 <div class="card-value" id="daily-dd">0.00%</div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="daily-dd-bar" style="width: 0%;"></div>
+                </div>
             </div>
+
+            <!-- Overall Drawdown Card -->
             <div class="card">
-                <div class="card-label">Overall DD</div>
+                <div class="card-header">
+                    <div class="card-label">Overall Drawdown</div>
+                    <div class="card-icon danger">📉</div>
+                </div>
                 <div class="card-value" id="overall-dd">0.00%</div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="overall-dd-bar" style="width: 0%;"></div>
+                </div>
             </div>
+
+            <!-- Win Rate Card -->
             <div class="card">
-                <div class="card-label">Win Rate</div>
-                <div class="card-value" id="win-rate">0.0%</div>
+                <div class="card-header">
+                    <div class="card-label">Win Rate</div>
+                    <div class="card-icon success">🎯</div>
+                </div>
+                <div class="circular-progress-container">
+                    <div class="circular-progress">
+                        <svg viewBox="0 0 80 80">
+                            <circle class="bg" cx="40" cy="40" r="36"></circle>
+                            <circle class="fg" id="win-rate-circle" cx="40" cy="40" r="36"></circle>
+                        </svg>
+                        <span class="circular-value" id="win-rate">0%</span>
+                    </div>
+                </div>
             </div>
         </div>
 
-
         <section>
-            <h2>Active Positions</h2>
+            <h2>📋 Active Positions</h2>
             <div class="table-container">
                 <table>
                     <thead>
@@ -65,7 +112,7 @@
                             <th>Symbol</th>
                             <th>Type</th>
                             <th>Lots</th>
-                            <th>Price</th>
+                            <th>Entry</th>
                             <th>Current</th>
                             <th>Profit</th>
                         </tr>
@@ -91,10 +138,11 @@
                 const data = await response.json();
 
                 if (data.error) {
-                    document.getElementById('last-updated').textContent = 'Cloud Active: Waiting for Bot...';
+                    setConnectionStatus(false, 'Waiting for Bot');
                     return;
                 }
 
+                setConnectionStatus(true, 'Connected');
                 window.allBotsData = data;
 
                 // Update Selector
@@ -102,7 +150,6 @@
                 const botIds = Object.keys(data);
 
                 if (botIds.length > 0) {
-                    // Update dropdown options if changed
                     const currentId = window.selectedBotId || botIds[0];
                     if (!window.selectedBotId) window.selectedBotId = currentId;
 
@@ -119,44 +166,89 @@
 
             } catch (err) {
                 console.error('Error fetching data:', err);
-                document.getElementById('last-updated').textContent = 'Connection Error';
+                setConnectionStatus(false, 'Connection Error');
             }
+        }
+
+        function setConnectionStatus(isConnected, text) {
+            const dot = document.getElementById('status-dot');
+            const textEl = document.getElementById('connection-text');
+
+            if (isConnected) {
+                dot.classList.remove('offline');
+            } else {
+                dot.classList.add('offline');
+            }
+            textEl.textContent = text;
         }
 
         function updateUI() {
             const botData = window.allBotsData[window.selectedBotId];
             if (!botData) return;
 
-            // Update KPIs
-            const currencyCode = botData.currency || 'USD'; 
-            document.getElementById('equity').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.equity);
-            document.getElementById('balance').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.balance);
-            document.getElementById('daily-pnl').textContent = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(botData.daily_pnl);
-            document.getElementById('daily-dd').textContent = botData.daily_dd.toFixed(2) + '%';
-            document.getElementById('overall-dd').textContent = botData.overall_dd.toFixed(2) + '%';
-            document.getElementById('win-rate').textContent = botData.win_rate.toFixed(1) + '%';
+            const currencyCode = botData.currency || 'USD';
+            const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode });
 
+            // Update KPIs with animation
+            animateValue('equity', formatter.format(botData.equity));
+            animateValue('balance', formatter.format(botData.balance));
+            animateValue('daily-pnl', formatter.format(botData.daily_pnl));
+
+            // Daily DD
+            const dailyDD = botData.daily_dd || 0;
+            document.getElementById('daily-dd').textContent = dailyDD.toFixed(2) + '%';
+            const dailyDDBar = document.getElementById('daily-dd-bar');
+            dailyDDBar.style.width = Math.min(dailyDD * 10, 100) + '%'; // Scale: 10% DD = 100% bar
+            if (dailyDD > 3) dailyDDBar.classList.add('danger');
+            else dailyDDBar.classList.remove('danger');
+
+            // Overall DD
+            const overallDD = botData.overall_dd || 0;
+            document.getElementById('overall-dd').textContent = overallDD.toFixed(2) + '%';
+            const overallDDBar = document.getElementById('overall-dd-bar');
+            overallDDBar.style.width = Math.min(overallDD * 5, 100) + '%'; // Scale: 20% DD = 100% bar
+            if (overallDD > 10) overallDDBar.classList.add('danger');
+            else overallDDBar.classList.remove('danger');
+
+            // Win Rate (Circular)
+            const winRate = botData.win_rate || 0;
+            document.getElementById('win-rate').textContent = winRate.toFixed(1) + '%';
+            const circle = document.getElementById('win-rate-circle');
+            const circumference = 2 * Math.PI * 36; // 226
+            const offset = circumference - (winRate / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
+
+            // PnL Color
             const pnlElement = document.getElementById('daily-pnl');
             pnlElement.className = 'card-value ' + (botData.daily_pnl >= 0 ? 'positive' : 'negative');
 
             document.getElementById('last-updated').textContent = 'Last Sync: ' + botData.last_updated;
 
-            // Update Positions
+            // Update Positions Table
             const tbody = document.getElementById('positions-table');
             if (botData.open_positions && botData.open_positions.length > 0) {
                 tbody.innerHTML = botData.open_positions.map(p => `
                     <tr>
                         <td>${p.ticket}</td>
-                        <td>${p.symbol}</td>
-                        <td><span class="status-badge status-live">${p.type}</span></td>
+                        <td><strong>${p.symbol}</strong></td>
+                        <td><span class="status-badge ${p.type === 'BUY' ? 'status-buy' : 'status-sell'}">${p.type}</span></td>
                         <td>${p.lots.toFixed(2)}</td>
                         <td>${p.open_price.toFixed(5)}</td>
                         <td>${p.current_price.toFixed(5)}</td>
-                        <td class="${p.profit >= 0 ? 'positive' : 'negative'}">${new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode }).format(p.profit)}</td>
+                        <td class="${p.profit >= 0 ? 'positive' : 'negative'}">${formatter.format(p.profit)}</td>
                     </tr>
                 `).join('');
             } else {
                 tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No active positions</td></tr>';
+            }
+        }
+
+        function animateValue(elementId, newValue) {
+            const el = document.getElementById(elementId);
+            if (el.textContent !== newValue) {
+                el.textContent = newValue;
+                el.classList.add('value-update');
+                setTimeout(() => el.classList.remove('value-update'), 500);
             }
         }
 

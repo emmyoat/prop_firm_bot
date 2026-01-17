@@ -550,6 +550,9 @@ def main():
                             "tp": p.tp
                         })
 
+                # Calculate unrealized PnL from open positions (for real-time accuracy)
+                unrealized_pnl = sum(p.profit for p in positions) if positions else 0.0
+
                 dashboard_data = {
                     "bot_id": str(config['system']['magic_number']),
                     "account_name": acc.name if acc else "Unknown",
@@ -557,7 +560,7 @@ def main():
                     "currency": acc.currency if acc else "USD", # Add Currency Support
                     "balance": acc.balance if acc else 0.0,
                     "equity": acc.equity if acc else 0.0,
-                    "daily_pnl": daily_stats.get('profit', 0.0) if daily_stats else 0.0,
+                    "daily_pnl": (daily_stats.get('profit', 0.0) if daily_stats else 0.0) + unrealized_pnl,
                     "daily_trades": daily_stats.get('trades', 0) if daily_stats else 0,
                     "win_rate": daily_stats.get('win_rate', 0.0) if daily_stats else 0.0,
                     "daily_dd": dd_metrics['daily_dd_pct'],

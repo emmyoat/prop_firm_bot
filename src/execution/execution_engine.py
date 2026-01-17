@@ -75,8 +75,15 @@ class ExecutionEngine:
         
         if self.notifier:
             side = "BUY" if order_type == mt5.ORDER_TYPE_BUY else "SELL"
+            
+            # Highlight Logic
+            header = "🚀 **Trade Executed**"
+            if "SWING" in comment.upper():
+                header = "🌊 **SWING TRADE DETECTED** 🌊"
+        
+            
             # ... (Risk calculation omitted for brevity, assuming existing logic)
-            msg = f"🚀 **Trade Executed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {result.price}\nSL: {stop_loss}\nTP: {take_profit}"
+            msg = f"{header}\nSymbol: {symbol}\nSide: {side}\nType: {comment}\nVolume: {volume}\nPrice: {result.price}\nSL: {stop_loss}\nTP: {take_profit}"
             self.notifier.send_message(msg)
             
         return True
@@ -162,7 +169,13 @@ class ExecutionEngine:
         
         if self.notifier:
              side = "BUY LIMIT" if order_type == mt5.ORDER_TYPE_BUY_LIMIT else "SELL LIMIT"
-             msg = f"⏳ **Limit Order Placed**\nSymbol: {symbol}\nSide: {side}\nVolume: {volume}\nPrice: {price}\nSL: {stop_loss}"
+             
+             # Highlight Logic
+             header = "⏳ **Limit Order Placed**"
+             if "SWING" in comment.upper():
+                 header = "🌊 **SWING LIMIT ORDER** 🌊"
+
+             msg = f"{header}\nSymbol: {symbol}\nSide: {side}\nType: {comment}\nVolume: {volume}\nPrice: {price}\nSL: {stop_loss}"
              self.notifier.send_message(msg)
 
         return True

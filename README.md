@@ -17,7 +17,6 @@ A professional-grade, python-based automated trading bot designed for **Prop Fir
 - **Breakeven**: Auto-moves Stop Loss to entry after +20 pips profit.
 - **Trailing Stop**: Activates at +50 pips, trails price by 25 pips (Prop-firm compliant).
 - **Trade Duration**: Enforces minimum trade duration (4 mins) to avoid "scalping" classifications.
-- **Connection Hardening**: Includes 1s API delay and auto-reconnect logic to prevent MT5 data gaps.
 
 ### 📊 Tech Stack
 - **Language**: Python 3.12+
@@ -53,20 +52,11 @@ A professional-grade, python-based automated trading bot designed for **Prop Fir
 5.  **Adjust Config**:
     *   Edit `config.yaml` to set your Risk % (default 2.0) and other parameters.
 
-## 📉 Backtesting & Performance
+## 📉 Backtesting
 
 Run the built-in backtester (uses live MT5 data or Yahoo Finance fallback):
 ```bash
 python backtest.py
-```
-
-### 🏆 Current Benchmarks (Dec 2025 - Jan 2026)
-| Metric | Result |
-| --- | --- |
-| **30-Day Win Rate** | **73.17%** |
-| **Total Trades** | 41 |
-| **Profit Factor** | 2.8+ |
-| **Max Drawdown** | < 3.5% |
 
 ## ▶️ Live Trading
 

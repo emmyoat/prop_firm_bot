@@ -10,6 +10,18 @@ cache = {
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # API Key authentication
+        api_key = self.headers.get('X-API-Key')
+        env_key = os.environ.get('DASHBOARD_API_KEY', 'propbot-secret')
+        
+        if api_key != env_key:
+            self.send_response(403)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b'{"error": "Unauthorized"}')
+            return
+        
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')

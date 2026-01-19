@@ -132,9 +132,22 @@
         window.allBotsData = {};
         window.selectedBotId = null;
 
+        // Get API key from localStorage or prompt user
+        function getApiKey() {
+            let key = localStorage.getItem('dashboard_api_key');
+            if (!key) {
+                key = prompt('Enter Dashboard API Key:');
+                if (key) localStorage.setItem('dashboard_api_key', key);
+            }
+            return key || '';
+        }
+
         async function fetchData() {
             try {
-                const response = await fetch('/api/index');
+                const apiKey = getApiKey();
+                const response = await fetch('/api/index', {
+                    headers: { 'X-API-Key': apiKey }
+                });
                 const data = await response.json();
 
                 if (data.error) {

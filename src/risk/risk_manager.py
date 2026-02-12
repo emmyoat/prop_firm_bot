@@ -1,0 +1,199 @@
+import logging
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+logger = logging.getLogger("PropBot.Risk")
+
+@dataclass
+class RiskConfig:
+    account_equity_risk_pct: float
+    max_daily_loss_pct: float
+    max_overall_drawdown_pct: float
+    max_spread_points: int
+    martingale_multiplier: float
+    profit_target_daily_pct: float
+    max_lot_size: Optional[float] = 5.0
+    spread_limit_map: Optional[dict] = None # New map
+    trailing_stop_activation_pips: Optional[int] = 50
+    breakeven_activation_pips: Optional[int] = 20
+    trailing_stop_distance_pips: Optional[int] = 25 # Renamed from trailing_step_pips
+    trailing_update_step_pips: Optional[int] = 5    # New logic
+    trailing_step_pips: Optional[int] = None       # Deprecated (kept if config still has it)
+    friday_exit_hour: Optional[int] = 21
+    min_trade_duration_seconds: Optional[int] = 240
+    pending_order_expiry_hours: Optional[int] = 4
+    symbol_risk_map: Optional[dict] = None
+
+class RiskManager:
+    def __init__(self, config: dict):
+        self.config = RiskConfig(**config['risk'])
+        self.daily_starting_equity = 0.0
+        self.daily_loss = 0.0
+        self.high_water_mark = 0.0
+        self.initial_balance = 0.0
+
+    def initialize_state(self, account_info, magic_number: int):
+        """Initializes the manager with current account state and loads saved HWM."""
+        self.daily_starting_equity = account_info.equity
+        self.initial_balance = account_info.balance
+        self.magic_number = magic_number
+        
+        # Load HWM from file if exists
+        import json
+        import os
+        hwm_file = f"risk_state_{self.magic_number}.json"
+        if os.path.exists(hwm_file):
+            try:
+                with open(hwm_file, "r") as f:
+                    state = json.load(f)
+                    self.high_water_mark = state.get("high_water_mark", account_info.balance)
+            except:
+                self.high_water_mark = account_info.balance
+        else:
+            self.high_water_mark = account_info.balance
+            
+        logger.info(f"RiskManager Initialized: Daily Start Equity={self.daily_starting_equity}, HWM={self.high_water_mark}")
+
+    def update_high_water_mark(self, current_equity: float):
+        """Updates the high-water mark and saves to file."""
+        if current_equity > self.high_water_mark:
+            self.high_water_mark = current_equity
+            try:
+                import json
+                state_file = f"risk_state_{self.magic_number}.json"
+                with open(state_file, "w") as f:
+                    json.dump({"high_water_mark": self.high_water_mark}, f)
+            except Exception as e:
+                logger.error(f"Failed to save HWM: {e}")
+
+    def get_drawdown_metrics(self, current_equity: float) -> dict:
+        """Calculates current drawdown percentages."""
+        # 1. Daily Drawdown (Relative to start of day)
+        daily_dd_pct = 0.0
+        # Sanity Check: If current_equity is <= 0.1 (likely disconnect/error), ignore calculation to prevent 100% spike
+        if self.daily_starting_equity > 0 and current_equity > 0.1:
+            daily_loss = self.daily_starting_equity - current_equity
+            daily_dd_pct = (daily_loss / self.daily_starting_equity) * 100.0
+
+        # 2. Overall Trailing Drawdown (Relative to HWM)
+        overall_dd_pct = 0.0
+        if self.high_water_mark > 0 and current_equity > 0.1:
+            overall_loss = self.high_water_mark - current_equity
+            overall_dd_pct = (overall_loss / self.high_water_mark) * 100.0
+
+        return {
+            "daily_dd_pct": max(0.0, daily_dd_pct),
+            "overall_dd_pct": max(0.0, overall_dd_pct),
+            "hwm": self.high_water_mark
+        }
+
+    def check_emergency_exit(self, account_info) -> Tuple[bool, str]:
+        """Checks if any drawdown limits have been breached."""
+        metrics = self.get_drawdown_metrics(account_info.equity)
+        
+        # Check Daily Limit
+        if metrics['daily_dd_pct'] >= self.config.max_daily_loss_pct:
+            return True, f"Daily Drawdown Limit Hit: {metrics['daily_dd_pct']:.2f}%"
+
+        # Check Overall Limit (Trailing)
+        if metrics['overall_dd_pct'] >= self.config.max_overall_drawdown_pct:
+            return True, f"Overall Trailing Drawdown Limit Hit: {metrics['overall_dd_pct']:.2f}%"
+
+        return False, ""
+
+    def check_profit_target(self, current_equity: float) -> Tuple[bool, str]:
+        """Checks if the daily profit target has been reached."""
+        if self.daily_starting_equity <= 0:
+            return False, ""
+            
+        profit = current_equity - self.daily_starting_equity
+        profit_pct = (profit / self.daily_starting_equity) * 100.0
+        
+        if profit_pct >= self.config.profit_target_daily_pct:
+            return True, f"Daily Profit Target Hit: {profit_pct:.2f}% >= {self.config.profit_target_daily_pct}%"
+            
+        return False, ""
+
+    def check_trade_allowed(self, account_info, symbol_info, spread_points: float) -> bool:
+        """Validates if a new trade is allowed based on Prop Firm rules."""
+        # Check emergency exit first
+        breached, reason = self.check_emergency_exit(account_info)
+        if breached:
+            logger.warning(reason)
+            return False
+
+        # 3. Check Spread
+        # 3. Check Spread
+        # Look for specific limit, otherwise use default
+        limit_map = self.config.spread_limit_map if self.config.spread_limit_map else {}
+        # Try exact match, then default
+        max_spread = limit_map.get(symbol_info.name, self.config.max_spread_points)
+        # Fallback partial match for indices (e.g. "US30+" matches "US30")
+        if symbol_info.name not in limit_map:
+             for key in limit_map:
+                 if key in symbol_info.name:
+                     max_spread = limit_map[key]
+                     break
+
+        if spread_points > max_spread:
+            logger.warning(f"Spread too high for {symbol_info.name}: {spread_points} > {max_spread}")
+            return False
+
+        return True
+
+    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float, loss_per_lot_override: float = None, symbol: str = None) -> float:
+        """
+        Calculates dynamic lot size based on risk percentage.
+        Formula: RiskAmount / LossPerLot
+        """
+        if stop_loss_dist <= 0:
+            return 0.0
+            
+        # Determine risk percentage for this symbol
+        risk_pct = self.config.account_equity_risk_pct
+        if symbol and self.config.symbol_risk_map and symbol in self.config.symbol_risk_map:
+            risk_pct = self.config.symbol_risk_map[symbol]
+            logger.info(f"Risk Logic: Using Override Risk {risk_pct}% for {symbol}")
+
+        risk_amount = account_balance * (risk_pct / 100.0)
+        
+        # Determine Loss Per 1 Lot
+        if loss_per_lot_override is not None and loss_per_lot_override > 0:
+            loss_per_lot = loss_per_lot_override
+        else:
+            # Fallback formula: (Distance / TickSize) * TickValue
+            loss_per_lot = (stop_loss_dist / tick_size) * tick_value
+        
+        if loss_per_lot <= 0:
+            logger.warning(f"Risk Logic Failed: Loss Per Lot {loss_per_lot} <= 0")
+            return 0.0
+            
+        lot_size = risk_amount / loss_per_lot
+        
+        logger.info(f"Risk Calc: Bal={account_balance:.2f} Risk={risk_pct}% (${risk_amount:.2f}) SL_Dist={stop_loss_dist:.2f} Loss/Lot={loss_per_lot:.2f} -> RawLot={lot_size:.4f}")
+        
+        # Round to 2 decimals
+        
+        # Round to 2 decimals
+        lot_size_floored = floor(lot_size * 100) / 100.0
+        
+        if lot_size_floored < 0.01: 
+            # Check edge case: If RawLot is very close to 0.01 (e.g. > 0.0085), allow it as 0.01
+            # This allows slightly higher risk (e.g. $99 vs $95 limit) for minimum position size
+            if lot_size >= 0.0085:
+                 logger.info(f"Risk Tolerance: Rounding {lot_size:.4f} up to 0.01")
+                 return 0.01
+            return 0.0
+        
+        lot_size = lot_size_floored
+            
+        # Hard Cap Max Lot Size
+        max_lot = self.config.max_lot_size if self.config.max_lot_size else 10.0
+        if lot_size > max_lot:
+             logger.warning(f"Calculated Lot {lot_size} exceeds safety cap. Using Max: {max_lot}")
+             lot_size = max_lot
+             
+        logger.info(f"Risk Logic: Risking ${risk_amount:.2f} | Loss per Lot: ${loss_per_lot:.2f} | Final Lot: {lot_size}")
+        return lot_size
+
+from math import floor

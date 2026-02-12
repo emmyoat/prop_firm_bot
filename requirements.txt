@@ -1,0 +1,3 @@
+# Cloud requirements only
+# The local bot still uses requirements-local.txt
+requests

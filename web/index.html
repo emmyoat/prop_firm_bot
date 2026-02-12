@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PropBot Cloud Dashboard</title>
+    <meta name="description" content="Real-time trading bot monitoring dashboard">
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <div class="header-content">
+                <h1>🤖 NimiBot</h1>
+                <div class="account-switcher">
+                    <span class="account-label">Account:</span>
+                    <select id="bot-selector" onchange="window.selectedBotId = this.value; updateUI();">
+                        <option value="">Detecting Bots...</option>
+                    </select>
+                </div>
+                <div class="connection-status" id="connection-status">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="connection-text">Connecting...</span>
+                </div>
+            </div>
+            <div class="last-updated" id="last-updated">--</div>
+        </header>
+
+        <div class="kpi-grid">
+            <!-- Equity Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Equity</div>
+                    <div class="card-icon">💰</div>
+                </div>
+                <div class="card-value large positive" id="equity">$0.00</div>
+                <div class="card-delta" id="equity-delta"></div>
+            </div>
+
+            <!-- Balance Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Balance</div>
+                    <div class="card-icon">📊</div>
+                </div>
+                <div class="card-value" id="balance">$0.00</div>
+            </div>
+
+            <!-- Daily PnL Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Daily PnL</div>
+                    <div class="card-icon success">📈</div>
+                </div>
+                <div class="card-value" id="daily-pnl">$0.00</div>
+            </div>
+
+            <!-- Daily Drawdown Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Daily Drawdown</div>
+                    <div class="card-icon warning">⚠️</div>
+                </div>
+                <div class="card-value" id="daily-dd">0.00%</div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="daily-dd-bar" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Overall Drawdown Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Overall Drawdown</div>
+                    <div class="card-icon danger">📉</div>
+                </div>
+                <div class="card-value" id="overall-dd">0.00%</div>
+                <div class="progress-container">
+                    <div class="progress-bar" id="overall-dd-bar" style="width: 0%;"></div>
+                </div>
+            </div>
+
+            <!-- Win Rate Card -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-label">Win Rate</div>
+                    <div class="card-icon success">🎯</div>
+                </div>
+                <div class="circular-progress-container">
+                    <div class="circular-progress">
+                        <svg viewBox="0 0 100 100">
+                            <circle class="bg" cx="50" cy="50" r="45"></circle>
+                            <circle class="fg" id="win-rate-circle" cx="50" cy="50" r="45"></circle>
+                        </svg>
+                        <span class="circular-value" id="win-rate">0%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <section>
+            <h2>📋 Active Positions</h2>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Ticket</th>
+                            <th>Symbol</th>
+                            <th>Type</th>
+                            <th>Lots</th>
+                            <th>Entry</th>
+                            <th>Current</th>
+                            <th>Profit</th>
+                        </tr>
+                    </thead>
+                    <tbody id="positions-table">
+                        <tr>
+                            <td colspan="7" class="empty-state">
+                                Waiting for data...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        window.allBotsData = {};
+        window.selectedBotId = null;
+
+        // Get API key from localStorage or prompt user
+        function getApiKey() {
+            let key = localStorage.getItem('dashboard_api_key');
+            if (!key) {
+                key = prompt('Enter Dashboard API Key:');
+                if (key) localStorage.setItem('dashboard_api_key', key);
+            }
+            return key || '';
+        }
+
+        async function fetchData() {
+            try {
+                const apiKey = getApiKey();
+                const response = await fetch('/api/index', {
+                    headers: { 'X-API-Key': apiKey }
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    setConnectionStatus(false, 'Waiting for Bot');
+                    return;
+                }
+
+                setConnectionStatus(true, 'Connected');
+                window.allBotsData = data;
+
+                // Update Selector
+                const selector = document.getElementById('bot-selector');
+                const botIds = Object.keys(data);
+
+                if (botIds.length > 0) {
+                    const currentId = window.selectedBotId || botIds[0];
+                    if (!window.selectedBotId) window.selectedBotId = currentId;
+
+                    if (selector.options.length !== botIds.length || selector.value !== window.selectedBotId) {
+                        selector.innerHTML = botIds.map(id => {
+                            const botData = data[id];
+                            const label = botData.account_name ? `${botData.account_name} (${id})` : `Bot #${id}`;
+                            return `<option value="${id}" ${id === window.selectedBotId ? 'selected' : ''}>${label}</option>`;
+                        }).join('');
+                    }
+                }
+
+                updateUI();
+
+            } catch (err) {
+                console.error('Error fetching data:', err);
+                setConnectionStatus(false, 'Connection Error');
+            }
+        }
+
+        function setConnectionStatus(isConnected, text) {
+            const dot = document.getElementById('status-dot');
+            const textEl = document.getElementById('connection-text');
+
+            if (isConnected) {
+                dot.classList.remove('offline');
+            } else {
+                dot.classList.add('offline');
+            }
+            textEl.textContent = text;
+        }
+
+        function updateUI() {
+            const botData = window.allBotsData[window.selectedBotId];
+            if (!botData) return;
+
+            const currencyCode = botData.currency || 'USD';
+            const formatter = new Intl.NumberFormat('en-US', { style: 'currency', currency: currencyCode });
+
+            // Update KPIs with animation
+            animateValue('equity', formatter.format(botData.equity));
+            animateValue('balance', formatter.format(botData.balance));
+            animateValue('daily-pnl', formatter.format(botData.daily_pnl));
+
+            // Daily DD
+            const dailyDD = botData.daily_dd || 0;
+            document.getElementById('daily-dd').textContent = dailyDD.toFixed(2) + '%';
+            const dailyDDBar = document.getElementById('daily-dd-bar');
+            dailyDDBar.style.width = Math.min(dailyDD * 10, 100) + '%'; // Scale: 10% DD = 100% bar
+            if (dailyDD > 3) dailyDDBar.classList.add('danger');
+            else dailyDDBar.classList.remove('danger');
+
+            // Overall DD
+            const overallDD = botData.overall_dd || 0;
+            document.getElementById('overall-dd').textContent = overallDD.toFixed(2) + '%';
+            const overallDDBar = document.getElementById('overall-dd-bar');
+            overallDDBar.style.width = Math.min(overallDD * 5, 100) + '%'; // Scale: 20% DD = 100% bar
+            if (overallDD > 10) overallDDBar.classList.add('danger');
+            else overallDDBar.classList.remove('danger');
+
+            // Win Rate (Circular)
+            const winRate = botData.win_rate || 0;
+            document.getElementById('win-rate').textContent = winRate.toFixed(1) + '%';
+            const circle = document.getElementById('win-rate-circle');
+            const circumference = 2 * Math.PI * 45; // 283
+            const offset = circumference - (winRate / 100) * circumference;
+            circle.style.strokeDashoffset = offset;
+
+            // PnL Color
+            const pnlElement = document.getElementById('daily-pnl');
+            pnlElement.className = 'card-value ' + (botData.daily_pnl >= 0 ? 'positive' : 'negative');
+
+            document.getElementById('last-updated').textContent = 'Last Sync: ' + botData.last_updated;
+
+            // Update Positions Table
+            const tbody = document.getElementById('positions-table');
+            if (botData.open_positions && botData.open_positions.length > 0) {
+                tbody.innerHTML = botData.open_positions.map(p => `
+                    <tr>
+                        <td>${p.ticket}</td>
+                        <td><strong>${p.symbol}</strong></td>
+                        <td><span class="status-badge ${p.type === 'BUY' ? 'status-buy' : 'status-sell'}">${p.type}</span></td>
+                        <td>${p.lots.toFixed(2)}</td>
+                        <td>${p.open_price.toFixed(5)}</td>
+                        <td>${p.current_price.toFixed(5)}</td>
+                        <td class="${p.profit >= 0 ? 'positive' : 'negative'}">${formatter.format(p.profit)}</td>
+                    </tr>
+                `).join('');
+            } else {
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No active positions</td></tr>';
+            }
+        }
+
+        function animateValue(elementId, newValue) {
+            const el = document.getElementById(elementId);
+            if (el.textContent !== newValue) {
+                el.textContent = newValue;
+                el.classList.add('value-update');
+                setTimeout(() => el.classList.remove('value-update'), 500);
+            }
+        }
+
+        // Initial fetch
+        fetchData();
+        // Refresh every 5 seconds
+        setInterval(fetchData, 5000);
+    </script>
+</body>
+
+</html>

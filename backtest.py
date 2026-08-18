@@ -181,15 +181,24 @@ def calculate_metrics(closed_trades: list, label: str = "ALL") -> dict | None:
                 cur = 0
         return best
 
-    # Session breakdown
+    # Session & Hourly breakdown
     session_dist: dict = {}
+    hourly_dist: dict = {}
     for t in closed_trades:
         s = t.get("session", "Unknown")
+        h = t.get("entry_hour", 0)
+
         session_dist.setdefault(s, {"trades": 0, "wins": 0, "pnl": 0.0})
         session_dist[s]["trades"] += 1
         session_dist[s]["pnl"]   += t["pnl"]
         if t["pnl"] > 0:
             session_dist[s]["wins"] += 1
+
+        hourly_dist.setdefault(h, {"trades": 0, "wins": 0, "pnl": 0.0})
+        hourly_dist[h]["trades"] += 1
+        hourly_dist[h]["pnl"]   += t["pnl"]
+        if t["pnl"] > 0:
+            hourly_dist[h]["wins"] += 1
 
     return {
         "label":           label,
@@ -209,6 +218,7 @@ def calculate_metrics(closed_trades: list, label: str = "ALL") -> dict | None:
         "max_drawdown":    max_dd,
         "sharpe_ratio":    sharpe,
         "session_dist":    session_dist,
+        "hourly_dist":     hourly_dist,
     }
 
 
@@ -242,12 +252,18 @@ def print_metrics(m: dict, prefix: str = ""):
     print(f"  {'Max Consec Losses':<28} {m['max_consec_losses']:>10}")
     print(f"  {'Max Drawdown':<28} {m['max_drawdown']:>10.4f}")
     print(f"  {'Sharpe Ratio':<28} {m['sharpe_ratio']:>10.2f}")
-    if m["session_dist"]:
+    if m.get("session_dist"):
         print(f"\n  {'Session':<18} {'Trades':>7} {'WR%':>6} {'PnL':>10}")
         print(f"  {'-'*44}")
         for s, d in sorted(m["session_dist"].items()):
             wr = d["wins"] / d["trades"] * 100 if d["trades"] else 0
             print(f"  {s:<18} {d['trades']:>7} {wr:>5.1f}% {d['pnl']:>+10.4f}")
+    if m.get("hourly_dist"):
+        print(f"\n  {'Hour (UTC)':<18} {'Trades':>7} {'WR%':>6} {'PnL':>10}")
+        print(f"  {'-'*44}")
+        for h, d in sorted(m["hourly_dist"].items()):
+            wr = d["wins"] / d["trades"] * 100 if d["trades"] else 0
+            print(f"  {f'{h:02d}:00 UTC':<18} {d['trades']:>7} {wr:>5.1f}% {d['pnl']:>+10.4f}")
     print(sep)
 
 

@@ -3,10 +3,12 @@
 creds.yaml
 
 # Bot State & Data
-dashboard_data_*.json
-risk_state_*.json
-dashboard_data.json
-risk_state.json
+ dashboard_data_*.json
+ risk_state_*.json
+ dashboard_data.json
+ risk_state.json
+ runtime_state*.db
+ runtime_state*.db-*
 
 # Logs
 *.log

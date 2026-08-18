@@ -150,6 +150,7 @@ def main():
 
     # ── Risk manager ──────────────────────────────────────────────────────────
     risk_manager = RiskManager(config, state_store=state_store)
+    risk_manager.health_monitor = health
     risk_manager.initialize_state()
     logger.info(f"Virtual account: ${risk_manager.virtual_balance:,.2f}")
 
@@ -169,7 +170,10 @@ def main():
             health.heartbeat()
             risk_manager.ensure_daily_rollover()
             health.evaluate()
-
+            for transition in health.drain_transitions():
+                _send_health_transition(notifier, transition, logger)
+            # Keep fetching while degraded or unhealthy so the data source can
+            # recover. Failed fetches below suppress signal processing naturally.
             # ── Friday close check ────────────────────────────────────────────
             if is_friday_close(config):
                 logger.warning("FRIDAY EXIT: Halting new signals for the weekend.")
@@ -238,6 +242,12 @@ def main():
                             logger.warning(f"No data for {symbol} {tf_low}/{tf_high} — skipping.")
                             continue
                         health.record_success("market_data", data_loader.get_metrics())
+                        market_data = health.get_component("market_data")
+                        if market_data and market_data["status"] == "unhealthy":
+                            logger.warning(
+                                "Market data remains unhealthy after fetch; suppressing signal."
+                            )
+                            continue
 
                         # B. Generate signal
                         signal = strategy.generate_signal({"LowTF": df_low, "HighTF": df_high}, symbol, label=label)
@@ -270,6 +280,7 @@ def main():
                                     stop_loss=signal.sl_price,
                                 )
                                 if score < smc_min:
+                                    state_store.release_signal(dedup_key, candle_time_str)
                                     logger.debug(f"SMC Filter: {symbol} skipped — score {score} < {smc_min}")
                                     continue
                                 signal.comment = f"{signal.comment} [SMC:{score}]"
@@ -353,8 +364,19 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
             "/help    — This menu"
         )
     elif cmd == "/health":
-        health_summary = getattr(risk_manager, "health_monitor", None)
-        notifier.send_message("Health reporting is available in the runtime log.")
+        health_monitor = getattr(risk_manager, "health_monitor", None)
+        if health_monitor is None:
+            notifier.send_message("Health monitor is not available.")
+        else:
+            health = health_monitor.summary()
+            lines = [f"*Runtime Health:* `{health['status']}`"]
+            for component in health["components"]:
+                reason = f" — {component['reason']}" if component["reason"] else ""
+                lines.append(
+                    f"`{component['component']}`: *{component['status']}*"
+                    f" ({component['consecutive_failures']} failures){reason}"
+                )
+            notifier.send_message("\n".join(lines))
     elif cmd == "/status":
         notifier.send_message(
             f"📊 *Bot & Account Status*\n"
@@ -375,6 +397,19 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
         logger.info("Telegram /stats requested")
     else:
         notifier.send_message(f"Unknown command: `{cmd}`\nType /help for the menu.")
+
+
+def _send_health_transition(notifier: TelegramNotifier, transition: dict, logger=None):
+    if logger is None:
+        logger = logging.getLogger("PropBot")
+    component = transition.get("component", "unknown")
+    status = transition.get("status", "unknown")
+    reason = transition.get("reason") or "status changed"
+    logger.warning("Health transition: %s=%s (%s)", component, status, reason)
+    if notifier.enabled and notifier.token and notifier.chat_id:
+        notifier.send_message(
+            f"*Health transition*\n`{component}`: *{status}*\n{reason}"
+        )
 
 
 def _send_performance_report(notifier: TelegramNotifier, stats_reporter, logger=None):

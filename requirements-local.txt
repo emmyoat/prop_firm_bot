@@ -8,3 +8,4 @@ python-dotenv==1.0.0
 pytz==2023.3.post1
 requests==2.31.0
 rich>=13.7.0
+pytest>=8.0.0

@@ -20,7 +20,7 @@ system:
 # Used for risk calculations (lot size recommendations, drawdown tracking).
 # No real money is at risk — this is signal-only.
 virtual_account:
-  balance: 10000.0          # Simulated account balance in USD
+  balance: 1000.0          # Simulated account balance in USD
   currency: "USD"
 
 # ── TwelveData API ───────────────────────────────────────────────────────────

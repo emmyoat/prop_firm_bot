@@ -1,49 +1,107 @@
+# Deploying the Prop Firm Signal Bot to a Cloud VPS
+
+This guide outlines how to deploy your **Signal-Only Bot** (TwelveData + Telegram) to run 24/7 on a cloud server.
+
+Since **no MetaTrader 5** is required, the bot runs lightweight on **Linux (Ubuntu/Debian)** or **Windows VPS**.
+
 ---
-description: How to deploy and run the Prop Firm Bot on a Windows VPS
+
+## 📋 Prerequisites
+1. **Cloud VPS** ($4–$6/mo on DigitalOcean, Hetzner, Vultr, AWS, or Linode).
+2. **TwelveData API Key** in `.env` (`TWELVEDATA_API_KEY=...`).
+3. **Telegram Credentials** in `.env` (`TELEGRAM_TOKEN=...`, `TELEGRAM_CHAT_ID=...`).
+4. **GitHub Repo Access** (`https://github.com/emmyoat/prop_firm_bot.git`).
+
 ---
 
-# Deploying the Bot to a Windows VPS
+## 🚀 Quick Setup on Ubuntu / Debian Linux VPS
 
-This guide outlines the steps to get your bot running 24/7 on a Virtual Private Server (VPS).
+### Step 1: Connect to your VPS via SSH
+```bash
+ssh root@YOUR_SERVER_IP
+```
 
-## 1. Prerequisites
-- **Windows VPS** (2GB RAM minimum, Windows Server 2019+).
-- **MetaTrader 5** installed and logged into your trading account.
-- **Python 3.12** installed on the VPS.
+### Step 2: Install Python & Git
+```bash
+sudo apt update && sudo apt install -y python3 python3-pip git
+```
 
-## 2. Setup Steps
-1. **Transfer Files**: Copy the bot folder to your VPS desktop.
-2. **Install Dependencies**:
-   Open PowerShell in the bot folder and run:
+### Step 3: Clone your repository
+```bash
+git clone https://github.com/emmyoat/prop_firm_bot.git
+cd prop_firm_bot
+```
+
+### Step 4: Install Python dependencies
+```bash
+pip3 install -r requirements.txt
+```
+
+### Step 5: Configure `.env`
+Create your `.env` file on the server:
+```bash
+nano .env
+```
+Paste your credentials:
+```env
+TWELVEDATA_API_KEY=5d8ec10ccd1f4bac9387cea7c5077c5e
+TELEGRAM_TOKEN=8538740560:AAEQeNkZCMLAwNehbY56QvuPFvDNB8DPD18
+TELEGRAM_CHAT_ID=-1003741948082
+```
+Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X`).
+
+---
+
+## 🔄 Run 24/7 in Background (Using Systemd)
+
+Create a background service so the bot starts automatically and restarts if server reboots:
+
+```bash
+sudo nano /etc/systemd/system/propbot.service
+```
+
+Paste the following:
+```ini
+[Unit]
+Description=Prop Firm Signal Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/prop_firm_bot
+ExecStart=/usr/bin/python3 /root/prop_firm_bot/main.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save and enable the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable propbot
+sudo systemctl start propbot
+```
+
+### Check Bot Status & Logs:
+```bash
+# View live logs:
+sudo journalctl -u propbot -f
+
+# Check status:
+sudo systemctl status propbot
+```
+
+---
+
+## 🖥️ Alternative: Running on a Windows VPS
+1. Connect via Remote Desktop (RDP).
+2. Open PowerShell and clone your repo:
    ```powershell
-   pip install -r requirements-local.txt
+   git clone https://github.com/emmyoat/prop_firm_bot.git
+   cd prop_firm_bot
    ```
-3. **Configure Environment**:
-   - Rename `.env.example` to `.env`.
-   - Add your Telegram credentials to `.env`.
-4. **Settings Check**:
-   - Open `config.yaml`.
-   - Ensure `mt5_path` points to the correct `terminal64.exe` location on your VPS.
-   - Verify `dry_run: false` if ready for challenges.
-
-## 3. Running the Bot (Background)
-To ensure the bot keeps running even if you close the RDS window:
-1. Open PowerShell.
-2. Run the bot using the provided batch file:
-   ```powershell
-   .\start_bot.bat
-   ```
-3. **Important**: Minimize the terminal window, do NOT close it.
-
-## 4. Monitoring
-- **Telegram**: The bot will notify you of every entry, TP, and SL hit.
-- **Logs**: Monitor `bot_123456_new.log` for real-time heartbeat.
-- **Web Dashboard**: If configured, run `python main.py --dashboard` to view stats via ngrok.
-
-## 5. Maintenance
-- **Weekly Check**: Refresh the VPS once a week on Saturday to clear memory.
-- **MT5 Updates**: Restart the terminal if MT5 prompts for an update.
-
----
-// turbo
-*Run the bot now?*: `.\start_bot.bat`
+3. Create your `.env` file.
+4. Run `start_bot.bat`.

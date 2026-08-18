@@ -11,11 +11,12 @@ so drawdown tracking survives bot restarts.
 """
 
 import logging
-import json
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 from math import floor
+
+from src.utils.state_store import StateStore
 
 logger = logging.getLogger("PropBot.Risk")
 
@@ -30,11 +31,9 @@ class RiskConfig:
     profit_target_daily_pct:   float
     max_lot_size:              Optional[float] = 5.0
     spread_limit_map:          Optional[dict]  = None
-    trailing_stop_activation_pips: Optional[int] = 50
-    breakeven_activation_pips:     Optional[int] = 20
-    trailing_stop_distance_pips:   Optional[int] = 25
-    trailing_update_step_pips:     Optional[int] = 5
-    trailing_step_pips:            Optional[int] = None  # Deprecated
+    trailing_stop_enabled:         Optional[bool] = True
+    trailing_stop_activation_pips: Optional[int] = 100
+    trailing_stop_distance_pips:   Optional[int] = 40
     friday_exit_hour:              Optional[int] = 21
     min_trade_duration_seconds:    Optional[int] = 240
     pending_order_expiry_hours:    Optional[int] = 4
@@ -48,12 +47,14 @@ class RiskManager:
     a simple numeric `current_equity` float instead.
     """
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, state_store: Optional[StateStore] = None):
         self.config = RiskConfig(**config["risk"])
 
         # Virtual paper account
         virtual_cfg = config.get("virtual_account", {})
         self._initial_balance: float = virtual_cfg.get("balance", 10_000.0)
+        state_path = config.get("runtime", {}).get("state_db_path", "runtime_state.db")
+        self.state_store = state_store or StateStore(state_path)
 
         # Runtime state
         self.daily_starting_equity: float = self._initial_balance
@@ -67,29 +68,30 @@ class RiskManager:
         self.signals_today:  int   = 0
         self.wins_today:     int   = 0
         self.losses_today:   int   = 0
+        self.trading_date:   str   = datetime.now(timezone.utc).date().isoformat()
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
     def initialize_state(self):
-        """
-        Loads saved HWM and paper P&L from disk.
-        Call once at startup (replaces the old initialize_state(account_info)).
-        """
-        hwm_file = f"risk_state_{self.magic_number}.json"
-        if os.path.exists(hwm_file):
-            try:
-                with open(hwm_file, "r") as f:
-                    state = json.load(f)
-                    self.high_water_mark       = state.get("high_water_mark", self._initial_balance)
-                    self.paper_pnl             = state.get("paper_pnl", 0.0)
-                    self.daily_starting_equity = state.get("daily_starting_equity", self._initial_balance)
-                    logger.info(f"RiskManager: Loaded state — HWM={self.high_water_mark:.2f}, PaperPnL={self.paper_pnl:.2f}")
-            except Exception as e:
-                logger.warning(f"RiskManager: Could not load state file ({e}). Using defaults.")
-                self.high_water_mark = self._initial_balance
+        """Load the persisted account snapshot and apply any missed UTC rollover."""
+        state = self.state_store.get_risk_state(self.magic_number)
+        if state:
+            self.high_water_mark = float(state["high_water_mark"])
+            self.paper_pnl = float(state["paper_pnl"])
+            self.daily_starting_equity = float(state["daily_starting_equity"])
+            self.daily_pnl = float(state["daily_pnl"])
+            self.signals_today = int(state["signals_today"])
+            self.wins_today = int(state["wins_today"])
+            self.losses_today = int(state["losses_today"])
+            self.trading_date = state.get("trading_date") or self.trading_date
+            logger.info(
+                f"RiskManager: Loaded state — HWM={self.high_water_mark:.2f}, "
+                f"PaperPnL={self.paper_pnl:.2f}, Date={self.trading_date}"
+            )
         else:
-            self.high_water_mark = self._initial_balance
+            self._save_state()
 
+        self.ensure_daily_rollover()
         logger.info(
             f"RiskManager initialised | Virtual Balance: ${self._initial_balance:,.2f} | HWM: ${self.high_water_mark:,.2f}"
         )
@@ -98,40 +100,57 @@ class RiskManager:
         """Virtual equity = initial balance + cumulative paper P&L."""
         return self._initial_balance + self.paper_pnl
 
-    def reset_daily(self):
-        """Call at midnight to reset daily tracking (can be called from scheduler)."""
+    def reset_daily(self, trading_date: Optional[str] = None):
+        """Reset daily tracking for a new UTC trading date."""
         self.daily_starting_equity = self._current_equity()
         self.daily_pnl      = 0.0
         self.signals_today  = 0
         self.wins_today     = 0
         self.losses_today   = 0
+        self.trading_date = trading_date or datetime.now(timezone.utc).date().isoformat()
         self._save_state()
-        logger.info("RiskManager: Daily stats reset.")
+        logger.info(f"RiskManager: Daily stats reset for {self.trading_date}.")
+
+    def ensure_daily_rollover(self, now: Optional[datetime] = None) -> bool:
+        """Apply a missed UTC rollover after midnight or process downtime."""
+        current_date = (now or datetime.now(timezone.utc)).date().isoformat()
+        if current_date != self.trading_date:
+            self.reset_daily(current_date)
+            return True
+        return False
 
     # ── State persistence ─────────────────────────────────────────────────────
 
     def _save_state(self):
-        try:
-            state_file = f"risk_state_{self.magic_number}.json"
-            with open(state_file, "w") as f:
-                json.dump({
-                    "high_water_mark":       self.high_water_mark,
-                    "paper_pnl":             self.paper_pnl,
-                    "daily_starting_equity": self.daily_starting_equity,
-                }, f, indent=2)
-        except Exception as e:
-            logger.error(f"RiskManager: Failed to save state: {e}")
+        self.state_store.save_risk_state({
+            "magic_number": self.magic_number,
+            "initial_balance": self._initial_balance,
+            "high_water_mark": self.high_water_mark,
+            "paper_pnl": self.paper_pnl,
+            "daily_starting_equity": self.daily_starting_equity,
+            "daily_pnl": self.daily_pnl,
+            "signals_today": self.signals_today,
+            "wins_today": self.wins_today,
+            "losses_today": self.losses_today,
+            "trading_date": self.trading_date,
+        })
 
     # ── Paper trade recording ─────────────────────────────────────────────────
+
+    def record_signal_sent(self) -> None:
+        """Persist a delivered signal without treating it as a closed trade."""
+        self.ensure_daily_rollover()
+        self.signals_today += 1
+        self._save_state()
 
     def record_paper_trade(self, pnl: float):
         """
         Records a paper trade outcome (TP hit = positive, SL hit = negative).
         Updates virtual equity and drawdown tracking.
         """
+        self.ensure_daily_rollover()
         self.paper_pnl  += pnl
         self.daily_pnl  += pnl
-        self.signals_today += 1
 
         if pnl >= 0:
             self.wins_today += 1

@@ -45,11 +45,10 @@ risk:
   martingale_multiplier: 1.0       # 1.0 = No Martingale
   max_lot_size: 5.0
 
-  # Trade management thresholds (informational — included in signal output)
-  breakeven_activation_pips: 50
-  trailing_stop_activation_pips: 50
-  trailing_stop_distance_pips: 25
-  trailing_update_step_pips: 20
+  # Trailing Stop & Breakeven Alerts
+  trailing_stop_enabled: true
+  trailing_stop_activation_pips: 100    # $10.00 move on Gold before trailing activates (100 pips)
+  trailing_stop_distance_pips: 40       # Trail SL $4.00 behind price (40 pips)
   friday_exit_hour: 21
   min_trade_duration_seconds: 240
   pending_order_expiry_hours: 4

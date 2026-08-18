@@ -354,11 +354,9 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
             pending_orders = []
             closed_trades  = []
 
-            trailing_activation = config["risk"].get("trailing_stop_activation_pips", 50) * pip_unit
-            trailing_step       = config["risk"].get("trailing_step_pips", 25)
-            if trailing_step is None:
-                trailing_step = config["risk"].get("trailing_stop_distance_pips", 25)
-            trailing_step = trailing_step * pip_unit
+            trailing_enabled = config["risk"].get("trailing_stop_enabled", True)
+            trailing_activation = config["risk"].get("trailing_stop_activation_pips", 100) * pip_unit
+            trailing_distance = config["risk"].get("trailing_stop_distance_pips", 40) * pip_unit
 
             print(f"  {symbol} [{label}] {tf_low}/{tf_high} — {len(df_low)} bars", end="", flush=True)
 
@@ -409,10 +407,10 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                             exit_price = t["sl"]
                         elif t["tp"] > 0 and bar["high"] >= t["tp"]:
                             exit_price = t["tp"]
-                        else:
+                        elif trailing_enabled:
                             profit_dist = bar["high"] - t["entry"]
                             if profit_dist >= trailing_activation:
-                                new_sl = t["entry"] + (profit_dist - trailing_step)
+                                new_sl = t["entry"] + (profit_dist - trailing_distance)
                                 if new_sl > t["sl"]:
                                     t["sl"] = new_sl
                     else:
@@ -420,10 +418,10 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                             exit_price = t["sl"]
                         elif t["tp"] > 0 and bar["low"] <= t["tp"]:
                             exit_price = t["tp"]
-                        else:
+                        elif trailing_enabled:
                             profit_dist = t["entry"] - bar["low"]
                             if profit_dist >= trailing_activation:
-                                new_sl = t["entry"] - (profit_dist - trailing_step)
+                                new_sl = t["entry"] - (profit_dist - trailing_distance)
                                 if new_sl < t["sl"]:
                                     t["sl"] = new_sl
 

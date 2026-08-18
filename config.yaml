@@ -47,8 +47,8 @@ risk:
 
   # Trailing Stop & Breakeven Alerts
   trailing_stop_enabled: true
-  trailing_stop_activation_pips: 100    # $10.00 move on Gold before trailing activates (100 pips)
-  trailing_stop_distance_pips: 40       # Trail SL $4.00 behind price (40 pips)
+  trailing_stop_activation_pips: 100    # $10.00 move on Gold (optimal balance of win rate & PnL)
+  trailing_stop_distance_pips: 40       # Trail SL $4.00 behind price
   friday_exit_hour: 21
   min_trade_duration_seconds: 240
   pending_order_expiry_hours: 4

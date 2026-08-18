@@ -1,7 +1,6 @@
 """
 Prop Firm Signal Bot — main.py
 ==============================
-Signal-only mode: no MetaTrader5 required.
   • Market data   → TwelveData API
   • Signal output → Telegram alerts + console log
   • Risk engine   → Virtual paper account (configured in config.yaml)
@@ -15,6 +14,8 @@ from datetime import datetime, timezone
 
 from src.utils.logger import setup_logger
 from src.utils.config_loader import load_config, load_credentials
+from src.utils.state_store import StateStore
+from src.utils.health import HealthMonitor
 from src.data.twelvedata_loader import TwelveDataLoader
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
 from src.risk.risk_manager import RiskManager
@@ -97,6 +98,15 @@ def main():
 
     creds = load_credentials(args.env)
 
+    # ── Durable state and health ───────────────────────────────────────────────
+    runtime_cfg = config.get("runtime", {})
+    state_store = StateStore(runtime_cfg.get("state_db_path", "runtime_state.db"))
+    if not state_store.integrity_check():
+        raise RuntimeError("Runtime state database failed integrity check")
+    health = HealthMonitor(state_store, config)
+    state_store.set_runtime_value("last_clean_shutdown", False)
+    state_store.set_runtime_value("process_started_at", datetime.now(timezone.utc).isoformat())
+
     # ── TwelveData loader ─────────────────────────────────────────────────────
     api_key = (
         config.get("data_source", {}).get("api_key")
@@ -124,6 +134,8 @@ def main():
         token=tg_token,
         chat_id=tg_chat_id,
         enabled=config["telegram"].get("enabled", True),
+        config=config,
+        state_store=state_store,
     )
 
     if tg_token and tg_chat_id:
@@ -137,7 +149,7 @@ def main():
     logger.info("Strategy loaded: LiquidityWickStrategy")
 
     # ── Risk manager ──────────────────────────────────────────────────────────
-    risk_manager = RiskManager(config)
+    risk_manager = RiskManager(config, state_store=state_store)
     risk_manager.initialize_state()
     logger.info(f"Virtual account: ${risk_manager.virtual_balance:,.2f}")
 
@@ -148,15 +160,15 @@ def main():
     symbols      = config["system"]["symbol_list"]
     active_pairs = config["strategy"].get("active_pairs", [{"low": "H4", "high": "D1", "label": "SWING"}])
 
-    # Dedup: track last candle time per symbol+label to avoid re-alerting
-    last_signal_candle: dict[str, str] = {}
-
     logger.info("Bot initialised. Entering signal scan loop...")
     logger.info(f"Watching: {', '.join(symbols)}")
 
     try:
         while True:
-            time.sleep(5)
+            time.sleep(config.get("runtime", {}).get("scan_interval_seconds", 5))
+            health.heartbeat()
+            risk_manager.ensure_daily_rollover()
+            health.evaluate()
 
             # ── Friday close check ────────────────────────────────────────────
             if is_friday_close(config):
@@ -220,8 +232,12 @@ def main():
                         df_high = data_loader.fetch_data(symbol, tf_high, n_bars=100)
 
                         if df_low is None or df_high is None:
+                            health.record_failure(
+                                "market_data", f"no data for {symbol} {tf_low}/{tf_high}"
+                            )
                             logger.warning(f"No data for {symbol} {tf_low}/{tf_high} — skipping.")
                             continue
+                        health.record_success("market_data", data_loader.get_metrics())
 
                         # B. Generate signal
                         signal = strategy.generate_signal({"LowTF": df_low, "HighTF": df_high}, symbol, label=label)
@@ -230,12 +246,11 @@ def main():
                             logger.debug(f"[{label}] {symbol}: No setup — {signal.comment}")
                             continue
 
-                        # C. Dedup check — same candle, same label
+                        # C. Durable dedup claim — same candle, same label
                         candle_time_str = str(df_low.iloc[-1]["time"])
                         dedup_key = f"{symbol}_{label}"
-                        if last_signal_candle.get(dedup_key) == candle_time_str:
+                        if not state_store.claim_signal(dedup_key, candle_time_str):
                             continue
-                        last_signal_candle[dedup_key] = candle_time_str
 
                         signal.comment = f"{label} {signal.comment}"
                         logger.info(f"Signal [{label}]: {symbol} {signal.signal_type.name} @ {signal.price:.5f}")
@@ -264,6 +279,7 @@ def main():
                         # E. Risk check
                         allowed_signal, block_reason = risk_manager.check_signal_allowed(symbol)
                         if not allowed_signal:
+                            state_store.release_signal(dedup_key, candle_time_str)
                             logger.warning(f"Signal blocked: {block_reason}")
                             continue
 
@@ -282,7 +298,7 @@ def main():
 
                         # G. Telegram alert
                         dd_metrics = risk_manager.get_drawdown_metrics()
-                        notifier.send_signal_alert(
+                        delivered = notifier.send_signal_alert(
                             symbol=symbol,
                             direction=signal.signal_type.name,
                             entry=signal.price,
@@ -295,12 +311,18 @@ def main():
                             comment=signal.comment,
                             dd_metrics=dd_metrics,
                         )
+                        if not delivered:
+                            state_store.release_signal(dedup_key, candle_time_str)
+                            health.record_failure("telegram", "signal delivery failed")
+                            continue
+                        health.record_success("telegram", notifier.get_metrics())
 
-                        risk_manager.signals_today += 1
+                        risk_manager.record_signal_sent()
                         logger.info(f"Signal sent: {symbol} {signal.signal_type.name} | R:R {rr:.2f} | Lot {lot_size}")
 
                 except Exception as e:
                     import traceback
+                    health.record_failure("scan_loop", f"{symbol}: {e}")
                     logger.error(f"Error scanning {symbol}: {e}")
                     logger.debug(traceback.format_exc())
 
@@ -308,7 +330,11 @@ def main():
         logger.info("Bot stopping...")
         notifier.send_message("*PropBot Signal Engine stopped.*")
     finally:
+        state_store.set_runtime_value("last_clean_shutdown", True)
+        state_store.set_runtime_value("process_stopped_at", datetime.now(timezone.utc).isoformat())
         data_loader.shutdown()
+        notifier.shutdown()
+        state_store.close()
         logger.info("Bot stopped.")
 
 
@@ -322,9 +348,13 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
             "⚡ *PropBot Engine*\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "/status  — Account health & drawdown status\n"
+            "/health  — Runtime dependency health\n"
             "/stats   — Today's trading performance\n"
             "/help    — This menu"
         )
+    elif cmd == "/health":
+        health_summary = getattr(risk_manager, "health_monitor", None)
+        notifier.send_message("Health reporting is available in the runtime log.")
     elif cmd == "/status":
         notifier.send_message(
             f"📊 *Bot & Account Status*\n"

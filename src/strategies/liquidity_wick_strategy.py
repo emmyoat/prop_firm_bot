@@ -1,7 +1,6 @@
 import pandas as pd
 import numpy as np
 import logging
-print("### STRATEGY MODULE LOADED ###")
 from src.strategies.base_strategy import Strategy
 from src.models import Signal, SignalType
 

@@ -18,10 +18,24 @@ class MT5DataLoader:
         # Ensure we start fresh if already initialized
         mt5.shutdown()
         
+        import time
+        
         path = self.config['system'].get('mt5_path')
-        if not (mt5.initialize(path=path) if path else mt5.initialize()):
-            logger.error(f"MT5 initialization failed: {mt5.last_error()}")
-            return False
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            if mt5.initialize(path=path) if path else mt5.initialize():
+                break
+            
+            error_code, error_desc = mt5.last_error()
+            logger.warning(f"MT5 initialization failed (Attempt {attempt+1}/{max_retries}): {error_desc} ({error_code})")
+            
+            if attempt < max_retries - 1:
+                logger.info("Retrying MT5 connection in 5 seconds...")
+                time.sleep(5)
+            else:
+                logger.error("Failed to initialize MT5 after multiple attempts.")
+                return False
 
         # Attempt to login if credentials provided
         if credentials["login"]:

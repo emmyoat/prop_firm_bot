@@ -1,98 +1,105 @@
-# Prop-Firm Compliant Trading Bot Configuration
+# Prop-Firm Signal Bot Configuration
+# ====================================
+# This bot runs in SIGNAL-ONLY mode — no MetaTrader5 connection required.
+# Signals are delivered via Telegram + rich terminal dashboard.
+# Data is sourced from TwelveData API (https://twelvedata.com).
 
 system:
   magic_number: 123456
   log_level: "INFO"
-  mt5_path: "C:\\Program Files\\MetaTrader 5\\terminal64.exe"
-  dry_run: false 
-  symbol_list: ["XAUUSD", "GBPUSD"]
-  timeframe: "M15"  # MT5 Timeframe constant name or string
-  # Session filter: only take new trades during these UTC hour ranges
-  # Set to [] to trade 24/7
+  symbol_list: ["XAUUSD"]
+  timeframe: "M15"
+  # Session filter: only generate signals during these UTC hour ranges.
+  # Set to [] to scan 24/7
   active_sessions:
-    - { name: "Asia", start_utc: 0, end_utc: 7 }
-    - { name: "London", start_utc: 7, end_utc: 12 }
-    - { name: "New York", start_utc: 12, end_utc: 17 }
+    - { name: "London",            start_utc: 8,  end_utc: 12 }
+    - { name: "London/NY Overlap", start_utc: 12, end_utc: 17 }
+    - { name: "New York",          start_utc: 17, end_utc: 21 }
 
+# ── Virtual Paper Account ────────────────────────────────────────────────────
+# Used for risk calculations (lot size recommendations, drawdown tracking).
+# No real money is at risk — this is signal-only.
+virtual_account:
+  balance: 10000.0          # Simulated account balance in USD
+  currency: "USD"
+
+# ── TwelveData API ───────────────────────────────────────────────────────────
+data_source:
+  provider: "twelvedata"
+  api_key: ""               # Also loadable from TWELVEDATA_API_KEY in .env
+  cache_seconds: 300        # 5-min cache: 624 API calls/day (safely under 800 limit)
+  # TwelveData free tier: 800 calls/day, 8 req/min
+  # Paid plans available at https://twelvedata.com/pricing
+
+# ── Risk Management ──────────────────────────────────────────────────────────
 risk:
-  account_equity_risk_pct: 5.0
-  max_daily_loss_pct: 10.0
-  max_overall_drawdown_pct: 10.0
-  profit_target_daily_pct: 10.0  # Optional daily target to stop trading
-  max_spread_points: 15         # Default Max spread
-  spread_limit_map:             # Specific limits per pair
-    US30: 200                   # US30 needs wider allowance (approx 20 pips)
-    USTECH100: 200
+  account_equity_risk_pct: 1.0     # % of virtual balance risked per signal
+  max_daily_loss_pct: 5.0          # Pause signalling if daily DD hits this
+  max_overall_drawdown_pct: 10.0   # Pause signalling if overall DD hits this
+  profit_target_daily_pct: 5.0     # Stop signalling once daily target is hit
+  max_spread_points: 15
+  spread_limit_map:
+    US30: 200
     NAS100: 200
-    XAUUSD: 30                  # Gold spread allowance
-    GBPUSD: 20                  # GBP/USD spread allowance
-  martingale_multiplier: 1.0    # 1.0 = No Martingale (Recommended)
-  
-  # Advanced Management
-  breakeven_activation_pips: 50   # Move SL to Entry when profit > 50 pips
-  trailing_stop_activation_pips: 50 # Start trailing when profit > 50 pips
-  trailing_stop_distance_pips: 25   # Distance of SL from Price (Previous: trailing_step_pips)
-  trailing_update_step_pips: 20      # Only update SL if it moves at least this many pips (Anti-Spam)
-  friday_exit_hour: 21              # Close all trades Friday at 21:00
-  min_trade_duration_seconds: 240 # Scalping Policy: Min holder time 4 mins
-  pending_order_expiry_hours: 4   # Cancel unfilled stop/limit orders after N hours
-  symbol_risk_map:
-    XAUUSD: 2.0
-    GBPUSD: 2.0
+    XAUUSD: 30
+  martingale_multiplier: 1.0       # 1.0 = No Martingale
+  max_lot_size: 5.0
 
+  # Trade management thresholds (informational — included in signal output)
+  breakeven_activation_pips: 50
+  trailing_stop_activation_pips: 50
+  trailing_stop_distance_pips: 25
+  trailing_update_step_pips: 20
+  friday_exit_hour: 21
+  min_trade_duration_seconds: 240
+  pending_order_expiry_hours: 4
+
+  symbol_risk_map:
+    XAUUSD: 1.0
+
+# ── Strategy ─────────────────────────────────────────────────────────────────
 strategy:
   ema_period_fast: 50
   ema_period_slow: 200
   rsi_period: 14
   rsi_overbought: 70
   rsi_oversold: 30
-  # RELAXED PARAMETERS (More Trades)
-  wick_threshold_ratio: 0.25    # Was 0.30 - lower = more signals
-  liquidity_lookback: 15        # Was 25 - shorter = more levels found
-  rsi_buy_threshold: 70         # Was 55 - higher = less filtering
-  rsi_sell_threshold: 30        # Was 35 - lower = less filtering
+  wick_threshold_ratio: 0.25
+  liquidity_lookback: 15
+  rsi_buy_threshold: 70
+  rsi_sell_threshold: 30
   sma_period: 40
   atr_multiplier: 1.5
   atr_multiplier_map:
-    XAUUSD: 0.5  # Dramatically reduced to allow trading on small balance
-    GBPUSD: 1.5  # Standard forex ATR
-
-
+    XAUUSD: 0.5
   entry_atr_multiplier: 0.1
   atr_period: 14
   sl_buffer_map:
     XAUUSD: 0.50
     US30: 5.0
     USTECH100: 5.0
-    GBPUSD: 0.0005    # 5 pips for forex
     default: 0.50
-  tp_mode: "dynamic"   # Options: "structured", "infinite", "dynamic", "fixed_rr"
-  risk_reward_ratio: 3.0 # Core RR Target
-  news_blocked_times: [] # Format: "2025-12-25 14:00"
+  tp_mode: "dynamic"        # Options: "structured", "dynamic", "fixed_rr"
+  risk_reward_ratio: 3.0
+  news_blocked_times: []
+
   # SMC Filter (Order Block + FVG Confluence)
   smc_filter_enabled: false
-  smc_min_confluence_score: 20  # 0=off, 20=light, 50=strict
+  smc_min_confluence_score: 20
+
+  # Active timeframe pairs to scan
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
     - { low: "H1", high: "H4", label: "DAY" }
+    - { low: "M15", high: "H1", label: "SCALP" }
 
-  # Per-symbol strategy overrides (override global defaults above)
-  symbol_overrides:
-    GBPUSD:
-      wick_threshold_ratio: 0.20  # Optimised for 6-months (+0.05 PnL, PF 1.76)
-      liquidity_lookback: 10      # Tighter lookback for recent levels
-      sma_period: 50              # Matches gold's trend speed
-      risk_reward_ratio: 2.0      # Conservative RR for forex
-      require_trend_alignment: true  # Keep strict trend
-      rsi_confirmation: true         # Re-enable RSI
-      rsi_buy_threshold: 60          # Allow buys up to 60 RSI (looser than 50)
-      rsi_sell_threshold: 40         # Allow sells down to 40 RSI (looser than 50)
-      # allowed_pairs removed to allow SWING + DAY
+  # Per-symbol strategy overrides
+  symbol_overrides: {}
 
+# ── Telegram ─────────────────────────────────────────────────────────────────
 telegram:
   enabled: true
-  enable_reports: false # Disable periodic performance reports
-  report_interval_hours: 4 # Reduce spam (default was hourly)
-
-  chat_id: ""
-  token: ""
+  enable_reports: false     # Periodic performance reports
+  report_interval_hours: 4
+  chat_id: ""               # Also loadable from TELEGRAM_CHAT_ID in .env
+  token: ""                 # Also loadable from TELEGRAM_TOKEN in .env

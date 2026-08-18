@@ -1,3 +1,15 @@
-# Cloud requirements only
-# The local bot still uses requirements-local.txt
-requests
+# Prop Firm Signal Bot — Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+PyYAML>=6.0
+python-dotenv>=1.0.0
+
+# Terminal UI
+rich>=13.7.0
+
+# Strategy / Data
+# (no MetaTrader5 — bot is signal-only)

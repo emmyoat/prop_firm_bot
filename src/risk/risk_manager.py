@@ -1,199 +1,311 @@
+"""
+Risk Manager — Signal-Only / Paper Account Mode
+================================================
+Works entirely without MT5. Uses a configured virtual balance for:
+  - Lot size recommendations (included in signal output)
+  - Daily drawdown tracking (simulated from paper trades)
+  - Session / spread / news filters
+
+Virtual account state is persisted in risk_state_<magic>.json
+so drawdown tracking survives bot restarts.
+"""
+
 import logging
-from dataclasses import dataclass
+import json
+import os
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
+from math import floor
 
 logger = logging.getLogger("PropBot.Risk")
 
+
 @dataclass
 class RiskConfig:
-    account_equity_risk_pct: float
-    max_daily_loss_pct: float
-    max_overall_drawdown_pct: float
-    max_spread_points: int
-    martingale_multiplier: float
-    profit_target_daily_pct: float
-    max_lot_size: Optional[float] = 5.0
-    spread_limit_map: Optional[dict] = None # New map
+    account_equity_risk_pct:   float
+    max_daily_loss_pct:        float
+    max_overall_drawdown_pct:  float
+    max_spread_points:         int
+    martingale_multiplier:     float
+    profit_target_daily_pct:   float
+    max_lot_size:              Optional[float] = 5.0
+    spread_limit_map:          Optional[dict]  = None
     trailing_stop_activation_pips: Optional[int] = 50
-    breakeven_activation_pips: Optional[int] = 20
-    trailing_stop_distance_pips: Optional[int] = 25 # Renamed from trailing_step_pips
-    trailing_update_step_pips: Optional[int] = 5    # New logic
-    trailing_step_pips: Optional[int] = None       # Deprecated (kept if config still has it)
-    friday_exit_hour: Optional[int] = 21
-    min_trade_duration_seconds: Optional[int] = 240
-    pending_order_expiry_hours: Optional[int] = 4
-    symbol_risk_map: Optional[dict] = None
+    breakeven_activation_pips:     Optional[int] = 20
+    trailing_stop_distance_pips:   Optional[int] = 25
+    trailing_update_step_pips:     Optional[int] = 5
+    trailing_step_pips:            Optional[int] = None  # Deprecated
+    friday_exit_hour:              Optional[int] = 21
+    min_trade_duration_seconds:    Optional[int] = 240
+    pending_order_expiry_hours:    Optional[int] = 4
+    symbol_risk_map:               Optional[dict] = None
+
 
 class RiskManager:
-    def __init__(self, config: dict):
-        self.config = RiskConfig(**config['risk'])
-        self.daily_starting_equity = 0.0
-        self.daily_loss = 0.0
-        self.high_water_mark = 0.0
-        self.initial_balance = 0.0
+    """
+    Paper / signal-only risk manager.
+    All methods that previously required mt5.account_info() now accept
+    a simple numeric `current_equity` float instead.
+    """
 
-    def initialize_state(self, account_info, magic_number: int):
-        """Initializes the manager with current account state and loads saved HWM."""
-        self.daily_starting_equity = account_info.equity
-        self.initial_balance = account_info.balance
-        self.magic_number = magic_number
-        
-        # Load HWM from file if exists
-        import json
-        import os
+    def __init__(self, config: dict):
+        self.config = RiskConfig(**config["risk"])
+
+        # Virtual paper account
+        virtual_cfg = config.get("virtual_account", {})
+        self._initial_balance: float = virtual_cfg.get("balance", 10_000.0)
+
+        # Runtime state
+        self.daily_starting_equity: float = self._initial_balance
+        self.initial_balance:       float = self._initial_balance
+        self.high_water_mark:       float = self._initial_balance
+        self.magic_number:          int   = config["system"]["magic_number"]
+
+        # Paper trade tracking
+        self.paper_pnl:      float = 0.0   # Cumulative simulated P&L
+        self.daily_pnl:      float = 0.0   # Today's simulated P&L
+        self.signals_today:  int   = 0
+        self.wins_today:     int   = 0
+        self.losses_today:   int   = 0
+
+    # ── Initialisation ────────────────────────────────────────────────────────
+
+    def initialize_state(self):
+        """
+        Loads saved HWM and paper P&L from disk.
+        Call once at startup (replaces the old initialize_state(account_info)).
+        """
         hwm_file = f"risk_state_{self.magic_number}.json"
         if os.path.exists(hwm_file):
             try:
                 with open(hwm_file, "r") as f:
                     state = json.load(f)
-                    self.high_water_mark = state.get("high_water_mark", account_info.balance)
-            except:
-                self.high_water_mark = account_info.balance
+                    self.high_water_mark       = state.get("high_water_mark", self._initial_balance)
+                    self.paper_pnl             = state.get("paper_pnl", 0.0)
+                    self.daily_starting_equity = state.get("daily_starting_equity", self._initial_balance)
+                    logger.info(f"RiskManager: Loaded state — HWM={self.high_water_mark:.2f}, PaperPnL={self.paper_pnl:.2f}")
+            except Exception as e:
+                logger.warning(f"RiskManager: Could not load state file ({e}). Using defaults.")
+                self.high_water_mark = self._initial_balance
         else:
-            self.high_water_mark = account_info.balance
-            
-        logger.info(f"RiskManager Initialized: Daily Start Equity={self.daily_starting_equity}, HWM={self.high_water_mark}")
+            self.high_water_mark = self._initial_balance
+
+        logger.info(
+            f"RiskManager initialised | Virtual Balance: ${self._initial_balance:,.2f} | HWM: ${self.high_water_mark:,.2f}"
+        )
+
+    def _current_equity(self) -> float:
+        """Virtual equity = initial balance + cumulative paper P&L."""
+        return self._initial_balance + self.paper_pnl
+
+    def reset_daily(self):
+        """Call at midnight to reset daily tracking (can be called from scheduler)."""
+        self.daily_starting_equity = self._current_equity()
+        self.daily_pnl      = 0.0
+        self.signals_today  = 0
+        self.wins_today     = 0
+        self.losses_today   = 0
+        self._save_state()
+        logger.info("RiskManager: Daily stats reset.")
+
+    # ── State persistence ─────────────────────────────────────────────────────
+
+    def _save_state(self):
+        try:
+            state_file = f"risk_state_{self.magic_number}.json"
+            with open(state_file, "w") as f:
+                json.dump({
+                    "high_water_mark":       self.high_water_mark,
+                    "paper_pnl":             self.paper_pnl,
+                    "daily_starting_equity": self.daily_starting_equity,
+                }, f, indent=2)
+        except Exception as e:
+            logger.error(f"RiskManager: Failed to save state: {e}")
+
+    # ── Paper trade recording ─────────────────────────────────────────────────
+
+    def record_paper_trade(self, pnl: float):
+        """
+        Records a paper trade outcome (TP hit = positive, SL hit = negative).
+        Updates virtual equity and drawdown tracking.
+        """
+        self.paper_pnl  += pnl
+        self.daily_pnl  += pnl
+        self.signals_today += 1
+
+        if pnl >= 0:
+            self.wins_today += 1
+        else:
+            self.losses_today += 1
+
+        self.update_high_water_mark(self._current_equity())
+        self._save_state()
+
+        logger.info(
+            f"Paper trade recorded: PnL=${pnl:+.2f} | Equity=${self._current_equity():,.2f} | HWM=${self.high_water_mark:,.2f}"
+        )
 
     def update_high_water_mark(self, current_equity: float):
-        """Updates the high-water mark and saves to file."""
+        """Updates HWM if equity has risen."""
         if current_equity > self.high_water_mark:
             self.high_water_mark = current_equity
-            try:
-                import json
-                state_file = f"risk_state_{self.magic_number}.json"
-                with open(state_file, "w") as f:
-                    json.dump({"high_water_mark": self.high_water_mark}, f)
-            except Exception as e:
-                logger.error(f"Failed to save HWM: {e}")
+            self._save_state()
 
-    def get_drawdown_metrics(self, current_equity: float) -> dict:
-        """Calculates current drawdown percentages."""
-        # 1. Daily Drawdown (Relative to start of day)
+    # ── Drawdown / risk checks ────────────────────────────────────────────────
+
+    def get_drawdown_metrics(self, current_equity: Optional[float] = None) -> dict:
+        """Returns daily and overall drawdown percentages."""
+        equity = current_equity if current_equity is not None else self._current_equity()
+
         daily_dd_pct = 0.0
-        # Sanity Check: If current_equity is <= 0.1 (likely disconnect/error), ignore calculation to prevent 100% spike
-        if self.daily_starting_equity > 0 and current_equity > 0.1:
-            daily_loss = self.daily_starting_equity - current_equity
+        if self.daily_starting_equity > 0 and equity > 0.1:
+            daily_loss   = self.daily_starting_equity - equity
             daily_dd_pct = (daily_loss / self.daily_starting_equity) * 100.0
 
-        # 2. Overall Trailing Drawdown (Relative to HWM)
         overall_dd_pct = 0.0
-        if self.high_water_mark > 0 and current_equity > 0.1:
-            overall_loss = self.high_water_mark - current_equity
-            overall_dd_pct = (overall_loss / self.high_water_mark) * 100.0
+        if self.high_water_mark > 0 and equity > 0.1:
+            overall_loss    = self.high_water_mark - equity
+            overall_dd_pct  = (overall_loss / self.high_water_mark) * 100.0
 
         return {
-            "daily_dd_pct": max(0.0, daily_dd_pct),
+            "daily_dd_pct":   max(0.0, daily_dd_pct),
             "overall_dd_pct": max(0.0, overall_dd_pct),
-            "hwm": self.high_water_mark
+            "hwm":            self.high_water_mark,
+            "equity":         equity,
         }
 
-    def check_emergency_exit(self, account_info) -> Tuple[bool, str]:
-        """Checks if any drawdown limits have been breached."""
-        metrics = self.get_drawdown_metrics(account_info.equity)
-        
-        # Check Daily Limit
-        if metrics['daily_dd_pct'] >= self.config.max_daily_loss_pct:
-            return True, f"Daily Drawdown Limit Hit: {metrics['daily_dd_pct']:.2f}%"
+    def check_emergency_exit(self) -> Tuple[bool, str]:
+        """Checks if virtual drawdown limits have been breached."""
+        metrics = self.get_drawdown_metrics()
 
-        # Check Overall Limit (Trailing)
-        if metrics['overall_dd_pct'] >= self.config.max_overall_drawdown_pct:
-            return True, f"Overall Trailing Drawdown Limit Hit: {metrics['overall_dd_pct']:.2f}%"
+        if metrics["daily_dd_pct"] >= self.config.max_daily_loss_pct:
+            return True, f"Daily Drawdown Limit Hit: {metrics['daily_dd_pct']:.2f}% >= {self.config.max_daily_loss_pct}%"
+
+        if metrics["overall_dd_pct"] >= self.config.max_overall_drawdown_pct:
+            return True, f"Overall Drawdown Limit Hit: {metrics['overall_dd_pct']:.2f}% >= {self.config.max_overall_drawdown_pct}%"
 
         return False, ""
 
-    def check_profit_target(self, current_equity: float) -> Tuple[bool, str]:
-        """Checks if the daily profit target has been reached."""
+    def check_profit_target(self) -> Tuple[bool, str]:
+        """Checks if the daily profit target has been hit."""
         if self.daily_starting_equity <= 0:
             return False, ""
-            
-        profit = current_equity - self.daily_starting_equity
+
+        profit     = self._current_equity() - self.daily_starting_equity
         profit_pct = (profit / self.daily_starting_equity) * 100.0
-        
+
         if profit_pct >= self.config.profit_target_daily_pct:
             return True, f"Daily Profit Target Hit: {profit_pct:.2f}% >= {self.config.profit_target_daily_pct}%"
-            
+
         return False, ""
 
-    def check_trade_allowed(self, account_info, symbol_info, spread_points: float) -> bool:
-        """Validates if a new trade is allowed based on Prop Firm rules."""
-        # Check emergency exit first
-        breached, reason = self.check_emergency_exit(account_info)
-        if breached:
-            logger.warning(reason)
-            return False
-
-        # 3. Check Spread
-        # 3. Check Spread
-        # Look for specific limit, otherwise use default
-        limit_map = self.config.spread_limit_map if self.config.spread_limit_map else {}
-        # Try exact match, then default
-        max_spread = limit_map.get(symbol_info.name, self.config.max_spread_points)
-        # Fallback partial match for indices (e.g. "US30+" matches "US30")
-        if symbol_info.name not in limit_map:
-             for key in limit_map:
-                 if key in symbol_info.name:
-                     max_spread = limit_map[key]
-                     break
-
-        if spread_points > max_spread:
-            logger.warning(f"Spread too high for {symbol_info.name}: {spread_points} > {max_spread}")
-            return False
-
-        return True
-
-    def calculate_lot_size(self, account_balance: float, stop_loss_dist: float, tick_value: float, tick_size: float, loss_per_lot_override: float = None, symbol: str = None) -> float:
+    def check_signal_allowed(self, symbol: str, spread_estimate: float = 0.0) -> Tuple[bool, str]:
         """
-        Calculates dynamic lot size based on risk percentage.
-        Formula: RiskAmount / LossPerLot
+        Validates whether a new signal should be acted on.
+        Replaces the old check_trade_allowed(account_info, symbol_info, spread_points).
+        """
+        # 1. Drawdown limits
+        breached, reason = self.check_emergency_exit()
+        if breached:
+            return False, reason
+
+        # 2. Profit target
+        target_hit, msg = self.check_profit_target()
+        if target_hit:
+            return False, f"Daily profit target already hit — {msg}"
+
+        # 3. Spread check (if caller provides an estimate)
+        if spread_estimate > 0:
+            limit_map   = self.config.spread_limit_map or {}
+            max_spread  = limit_map.get(symbol, self.config.max_spread_points)
+            # Partial key match for indices (e.g. "NAS100" in "NAS100+")
+            if symbol not in limit_map:
+                for key in limit_map:
+                    if key in symbol:
+                        max_spread = limit_map[key]
+                        break
+
+            if spread_estimate > max_spread:
+                return False, f"Spread too high for {symbol}: {spread_estimate:.1f} > {max_spread}"
+
+        return True, ""
+
+    # ── Lot size calculation ──────────────────────────────────────────────────
+
+    def calculate_lot_size(
+        self,
+        stop_loss_dist:        float,
+        tick_value:            float  = 10.0,
+        tick_size:             float  = 0.0001,
+        loss_per_lot_override: Optional[float] = None,
+        symbol:                Optional[str]   = None,
+        account_balance:       Optional[float] = None,
+    ) -> float:
+        """
+        Calculates recommended lot size based on virtual risk percentage.
+        `account_balance` defaults to current virtual equity if not supplied.
         """
         if stop_loss_dist <= 0:
             return 0.0
-            
-        # Determine risk percentage for this symbol
+
+        balance = account_balance if account_balance is not None else self._current_equity()
+
+        # Per-symbol risk override
         risk_pct = self.config.account_equity_risk_pct
         if symbol and self.config.symbol_risk_map and symbol in self.config.symbol_risk_map:
             risk_pct = self.config.symbol_risk_map[symbol]
-            logger.info(f"Risk Logic: Using Override Risk {risk_pct}% for {symbol}")
+            logger.info(f"Risk: Using override {risk_pct}% for {symbol}")
 
-        risk_amount = account_balance * (risk_pct / 100.0)
-        
-        # Determine Loss Per 1 Lot
+        risk_amount = balance * (risk_pct / 100.0)
+
+        # Loss per lot
         if loss_per_lot_override is not None and loss_per_lot_override > 0:
             loss_per_lot = loss_per_lot_override
         else:
-            # Fallback formula: (Distance / TickSize) * TickValue
-            loss_per_lot = (stop_loss_dist / tick_size) * tick_value
-        
-        if loss_per_lot <= 0:
-            logger.warning(f"Risk Logic Failed: Loss Per Lot {loss_per_lot} <= 0")
-            return 0.0
-            
-        lot_size = risk_amount / loss_per_lot
-        
-        logger.info(f"Risk Calc: Bal={account_balance:.2f} Risk={risk_pct}% (${risk_amount:.2f}) SL_Dist={stop_loss_dist:.2f} Loss/Lot={loss_per_lot:.2f} -> RawLot={lot_size:.4f}")
-        
-        # Round to 2 decimals
-        
-        # Round to 2 decimals
-        lot_size_floored = floor(lot_size * 100) / 100.0
-        
-        if lot_size_floored < 0.01: 
-            # Check edge case: If RawLot is very close to 0.01 (e.g. > 0.0085), allow it as 0.01
-            # This allows slightly higher risk (e.g. $99 vs $95 limit) for minimum position size
-            if lot_size >= 0.0085:
-                 logger.info(f"Risk Tolerance: Rounding {lot_size:.4f} up to 0.01")
-                 return 0.01
-            return 0.0
-        
-        lot_size = lot_size_floored
-            
-        # Hard Cap Max Lot Size
-        max_lot = self.config.max_lot_size if self.config.max_lot_size else 10.0
-        if lot_size > max_lot:
-             logger.warning(f"Calculated Lot {lot_size} exceeds safety cap. Using Max: {max_lot}")
-             lot_size = max_lot
-             
-        logger.info(f"Risk Logic: Risking ${risk_amount:.2f} | Loss per Lot: ${loss_per_lot:.2f} | Final Lot: {lot_size}")
-        return lot_size
+            loss_per_lot = (stop_loss_dist / tick_size) * tick_value if tick_size > 0 else 0.0
 
-from math import floor
+        if loss_per_lot <= 0:
+            logger.warning(f"Risk: loss_per_lot <= 0 ({loss_per_lot}). Cannot size.")
+            return 0.0
+
+        raw_lot = risk_amount / loss_per_lot
+        lot_floored = floor(raw_lot * 100) / 100.0
+
+        if lot_floored < 0.01:
+            if raw_lot >= 0.0085:
+                return 0.01
+            return 0.0
+
+        max_lot = self.config.max_lot_size or 10.0
+        lot = min(lot_floored, max_lot)
+
+        logger.info(
+            f"Risk calc | Balance=${balance:.2f} | Risk={risk_pct}% (${risk_amount:.2f}) | "
+            f"SL_dist={stop_loss_dist:.5f} | Loss/lot=${loss_per_lot:.2f} | Lot={lot}"
+        )
+        return lot
+
+    # ── Convenience properties ────────────────────────────────────────────────
+
+    @property
+    def virtual_equity(self) -> float:
+        return self._current_equity()
+
+    @property
+    def virtual_balance(self) -> float:
+        return self._initial_balance
+
+    def get_summary(self) -> dict:
+        metrics = self.get_drawdown_metrics()
+        return {
+            "virtual_balance":   self._initial_balance,
+            "virtual_equity":    self._current_equity(),
+            "paper_pnl":         self.paper_pnl,
+            "daily_pnl":         self.daily_pnl,
+            "high_water_mark":   self.high_water_mark,
+            "daily_dd_pct":      metrics["daily_dd_pct"],
+            "overall_dd_pct":    metrics["overall_dd_pct"],
+            "signals_today":     self.signals_today,
+            "wins_today":        self.wins_today,
+            "losses_today":      self.losses_today,
+        }

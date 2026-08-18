@@ -14,6 +14,7 @@ class NewsLoader:
         self.last_update = 0
         self.cached_news = []
         self.blocked_minutes = set() # Set of "YYYY-MM-DD HH:MM" strings
+        self.session = requests.Session()
 
     def update_news(self):
         """Fetches news and updates blocked times."""
@@ -25,7 +26,7 @@ class NewsLoader:
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
             logger.info("Fetching Economic News...")
-            response = requests.get(self.url, headers=headers, timeout=10)
+            response = self.session.get(self.url, headers=headers, timeout=15)
             if response.status_code == 200:
                 data = response.json()
                 self.cached_news = data

@@ -23,7 +23,7 @@ virtual_account:
 data_source:
   provider: "twelvedata"
   api_key: ""               # Also loadable from TWELVEDATA_API_KEY in .env
-  cache_seconds: 300        # 5-min cache: 624 API calls/day (safely under 800 limit)
+  cache_seconds: 480        # 8-min cache: 720 API calls/day 24/7 (safely under 800 limit)
   max_stale_seconds: 900    # Fail closed after 15 minutes of stale market data
   min_request_gap_seconds: 8
   requests_per_minute: 8

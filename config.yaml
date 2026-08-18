@@ -9,12 +9,8 @@ system:
   log_level: "INFO"
   symbol_list: ["XAUUSD"]
   timeframe: "M15"
-  # Session filter: only generate signals during these UTC hour ranges.
-  # Set to [] to scan 24/7
-  active_sessions:
-    - { name: "London",            start_utc: 8,  end_utc: 12 }
-    - { name: "London/NY Overlap", start_utc: 12, end_utc: 17 }
-    - { name: "New York",          start_utc: 17, end_utc: 21 }
+  # Session filter: set to [] to scan 24/7 (capturing high-win-rate 12:00 AM signals)
+  active_sessions: []
 
 # ── Virtual Paper Account ────────────────────────────────────────────────────
 # Used for risk calculations (lot size recommendations, drawdown tracking).
@@ -28,6 +24,17 @@ data_source:
   provider: "twelvedata"
   api_key: ""               # Also loadable from TWELVEDATA_API_KEY in .env
   cache_seconds: 300        # 5-min cache: 624 API calls/day (safely under 800 limit)
+  max_stale_seconds: 900    # Fail closed after 15 minutes of stale market data
+  min_request_gap_seconds: 8
+  requests_per_minute: 8
+  daily_request_limit: 800
+  retry:
+    max_attempts: 3
+    base_delay_seconds: 2
+    max_delay_seconds: 30
+    jitter_seconds: 1
+    connect_timeout_seconds: 5
+    read_timeout_seconds: 15
   # TwelveData free tier: 800 calls/day, 8 req/min
   # Paid plans available at https://twelvedata.com/pricing
 
@@ -95,6 +102,16 @@ strategy:
   # Per-symbol strategy overrides
   symbol_overrides: {}
 
+# ── Runtime & Health ───────────────────────────────────────────────────────────
+runtime:
+  state_db_path: "runtime_state.db"
+  scan_interval_seconds: 5
+
+health:
+  loop_stale_seconds: 120
+  data_stale_seconds: 900
+  failure_threshold: 3
+
 # ── Telegram ─────────────────────────────────────────────────────────────────
 telegram:
   enabled: true
@@ -102,3 +119,10 @@ telegram:
   report_interval_hours: 4
   chat_id: ""               # Also loadable from TELEGRAM_CHAT_ID in .env
   token: ""                 # Also loadable from TELEGRAM_TOKEN in .env
+  retry:
+    max_attempts: 2
+    base_delay_seconds: 1
+    max_delay_seconds: 5
+    jitter_seconds: 0.5
+    connect_timeout_seconds: 3
+    read_timeout_seconds: 8

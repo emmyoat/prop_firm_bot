@@ -447,8 +447,17 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                         closed_trades.append(t)
                         active_trades.remove(t)
 
-                # ── Signal generation (only when flat) ───────────────────────
+                # ── Signal generation (only when flat & in active session) ────
                 if not active_trades and not pending_orders:
+                    # Respect active_sessions from config (mirrors live bot behaviour)
+                    active_sessions = config.get("system", {}).get("active_sessions", [])
+                    if active_sessions:
+                        in_session = any(
+                            s.get("start_utc", 0) <= curr_time.hour < s.get("end_utc", 24)
+                            for s in active_sessions
+                        )
+                        if not in_session:
+                            continue
                     htf_slice = df_high[df_high.index <= curr_time]
                     if len(htf_slice) < 20:
                         continue

@@ -9,11 +9,11 @@ system:
   log_level: "INFO"
   symbol_list: ["XAUUSD"]
   timeframe: "M15"
-  # Session filter: restricted to high-win-rate windows (avoids 05:00-09:00 UTC chop)
+  # Session filter: restricted to high-win-rate windows (avoids 05:00-09:00 UTC chop & 17:00 NY open spike)
   active_sessions:
     - { name: "London",            start_utc: 8,  end_utc: 12 }
     - { name: "London/NY Overlap", start_utc: 12, end_utc: 17 }
-    - { name: "New York",          start_utc: 17, end_utc: 22 }
+    - { name: "New York",          start_utc: 18, end_utc: 22 }  # Skip 17:00 NY open spike (28.6% WR)
     - { name: "Late NY / Asia",    start_utc: 22, end_utc: 24 }
 
 # ── Virtual Paper Account ────────────────────────────────────────────────────

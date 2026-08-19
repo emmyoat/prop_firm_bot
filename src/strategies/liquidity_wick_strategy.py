@@ -66,6 +66,20 @@ class LiquidityWickStrategy(Strategy):
                  return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Trend Misalignment")
              current_trend = trend_entry
 
+        # ── D1 Macro Trend Gate ───────────────────────────────────────────────
+        # Uses EMA-20 on D1 — faster than SMA-50, prevents counter-trend signals
+        # without over-filtering valid setups during normal corrections.
+        df_macro = data.get("MacroTF")
+        if df_macro is not None and len(df_macro) >= 20:
+            macro_trend = self._get_macro_trend(df_macro)
+            if macro_trend != SignalType.NEUTRAL and macro_trend != current_trend:
+                logger.debug(
+                    f"{symbol} [{label}] MacroTF gate: D1 EMA-20={macro_trend.name} "
+                    f"conflicts with signal={current_trend.name} — blocked"
+                )
+                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                              f"D1 macro filter ({macro_trend.name} vs {current_trend.name})")
+
 
 
         if current_trend == SignalType.NEUTRAL:
@@ -259,6 +273,17 @@ class LiquidityWickStrategy(Strategy):
         elif df['close'].iloc[-1] < sma.iloc[-1]:
              return SignalType.SELL
         
+        return SignalType.NEUTRAL
+
+    def _get_macro_trend(self, df: pd.DataFrame, period: int = 20) -> SignalType:
+        """D1 macro trend using EMA-20 — faster and more responsive than SMA-50."""
+        ema = df['close'].ewm(span=period, adjust=False).mean()
+        price = df['close'].iloc[-1]
+        ema_val = ema.iloc[-1]
+        if price > ema_val:
+            return SignalType.BUY
+        elif price < ema_val:
+            return SignalType.SELL
         return SignalType.NEUTRAL
 
     def _find_recent_liquidity(self, df: pd.DataFrame, trend: SignalType) -> float:

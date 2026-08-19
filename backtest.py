@@ -461,7 +461,14 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                     htf_slice = df_high[df_high.index <= curr_time]
                     if len(htf_slice) < 20:
                         continue
-                    data_map = {"LowTF": df_low.iloc[:i+1], "HighTF": htf_slice}
+                    # MacroTF (D1) gate for SCALP & DAY pairs
+                    macro_slice = None
+                    df_macro_all = data_cache.get(f"{symbol}_D1")
+                    if df_macro_all is not None and tf_high != "D1":
+                        macro_slice = df_macro_all[df_macro_all.index <= curr_time]
+                        if len(macro_slice) < 50:
+                            macro_slice = None
+                    data_map = {"LowTF": df_low.iloc[:i+1], "HighTF": htf_slice, "MacroTF": macro_slice}
                     signal   = strategy.generate_signal(data_map, symbol, label=label)
 
                     if signal.signal_type != SignalType.NEUTRAL:

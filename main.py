@@ -249,8 +249,14 @@ def main():
                             )
                             continue
 
-                        # B. Generate signal
-                        signal = strategy.generate_signal({"LowTF": df_low, "HighTF": df_high}, symbol, label=label)
+                        # B. Generate signal — pass D1 as MacroTF gate for SCALP & DAY
+                        df_macro = None
+                        if tf_high != "D1":
+                            df_macro = data_loader.fetch_data(symbol, "D1", n_bars=100)
+                        signal = strategy.generate_signal(
+                            {"LowTF": df_low, "HighTF": df_high, "MacroTF": df_macro},
+                            symbol, label=label
+                        )
 
                         if signal.signal_type == models.SignalType.NEUTRAL:
                             logger.debug(f"[{label}] {symbol}: No setup — {signal.comment}")

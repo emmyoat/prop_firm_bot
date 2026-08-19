@@ -186,10 +186,8 @@ class TelegramNotifier:
             f"📍 Entry:  `{entry:.5f}`\n"
             f"🛑 SL:     `{sl:.5f}`\n"
             f"🎯 TP:     `{tp:.5f}`\n"
-            f"📊 R:R:    `{rr:.2f}R`  {rr_label}\n"
             f"💼 Lot:    `{lot_size}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"_{comment}_\n"
             f"[📈 View Chart on TradingView]({chart_url})"
         )
 

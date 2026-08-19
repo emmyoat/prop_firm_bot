@@ -260,7 +260,7 @@ class LiquidityWickStrategy(Strategy):
             reward = abs(tp_price - price)
             rr_ratio = reward / risk if risk > 0 else 0
 
-            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_limit_order=is_limit, is_stop_order=is_stop_order, comment=f"Liquidity Wick Sweep (R:R {rr_ratio:.2f})")
+            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_limit_order=is_limit, is_stop_order=is_stop_order, comment="Liquidity Wick Sweep")
 
         return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0)
 

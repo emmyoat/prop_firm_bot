@@ -86,8 +86,6 @@ strategy:
   atr_period: 14
   sl_buffer_map:
     XAUUSD: 0.50
-    US30: 5.0
-    USTECH100: 5.0
     default: 0.50
   tp_mode: "dynamic"        # Options: "structured", "dynamic", "fixed_rr"
   risk_reward_ratio: 3.0

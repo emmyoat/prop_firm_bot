@@ -238,37 +238,38 @@ class TwelveDataLoader:
         Returns a DataFrame with columns: [time, open, high, low, close, volume]
         Identical format to MT5DataLoader.fetch_data().
         """
-        cache_key = (symbol, timeframe, n_bars)
+        cache_key = (symbol, timeframe)
         now = self._clock()
 
-        # Return cached data if still fresh
+        # Return cached data if still fresh and has sufficient bars
         if cache_key in self._cache:
             cached_at, df = self._cache[cache_key]
-            if now - cached_at < self._cache_ttl:
+            if now - cached_at < self._cache_ttl and len(df) >= min(n_bars, 20):
                 self.metrics["cache_hits"] += 1
                 logger.debug(f"TwelveData: Cache hit for {symbol} {timeframe}")
-                return df.copy()
+                return df.tail(n_bars).copy()
 
         td_symbol = self._to_td_symbol(symbol)
         td_interval = self._to_td_timeframe(timeframe)
+        request_bars = max(n_bars, 100)
 
         try:
             params = {
                 "symbol": td_symbol,
                 "interval": td_interval,
-                "outputsize": n_bars,
+                "outputsize": request_bars,
                 "format": "JSON",
                 "order": "ASC",
             }
 
-            logger.debug(f"TwelveData: Fetching {symbol} ({td_symbol}) {timeframe} ({td_interval}) x{n_bars}")
+            logger.debug(f"TwelveData: Fetching {symbol} ({td_symbol}) {timeframe} ({td_interval}) x{request_bars}")
             data = self._request_json("time_series", params=params)
             if data is None:
                 cached = self._cache.get(cache_key)
                 if cached and now - cached[0] <= self._max_stale_seconds:
                     self.metrics["stale_cache_hits"] += 1
                     logger.warning(f"TwelveData: Serving stale cache for {symbol} {timeframe}")
-                    return cached[1].copy()
+                    return cached[1].tail(n_bars).copy()
                 return None
 
             values = data.get("values", [])
@@ -294,7 +295,7 @@ class TwelveDataLoader:
             self._cache[cache_key] = (self._clock(), df)
 
             logger.debug(f"TwelveData: Loaded {len(df)} bars for {symbol} {timeframe}")
-            return df
+            return df.tail(n_bars).copy()
 
         except Exception as e:
             logger.error(f"TwelveData: Unexpected error for {symbol}: {e}")

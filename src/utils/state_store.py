@@ -101,6 +101,27 @@ class StateStore:
                     value TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS active_trades (
+                    trade_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    entry REAL NOT NULL,
+                    sl REAL NOT NULL,
+                    tp REAL NOT NULL,
+                    initial_sl REAL NOT NULL,
+                    current_sl REAL NOT NULL,
+                    is_stop_order INTEGER NOT NULL DEFAULT 1,
+                    triggered INTEGER NOT NULL DEFAULT 0,
+                    be_alerted INTEGER NOT NULL DEFAULT 0,
+                    last_trail_sl REAL NOT NULL DEFAULT 0,
+                    highest_price REAL NOT NULL,
+                    lowest_price REAL NOT NULL,
+                    lot_size REAL NOT NULL DEFAULT 0.01,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             db.execute(
@@ -310,3 +331,69 @@ class StateStore:
         with self._connection() as db:
             result = db.execute("PRAGMA integrity_check").fetchone()[0]
         return result == "ok"
+
+    # ── Active Trade Tracker ──────────────────────────────────────────────────
+
+    def save_active_trade(self, trade: dict[str, Any]) -> None:
+        now = trade.get("updated_at") or utc_now()
+        created = trade.get("created_at") or now
+        with self._connection() as db:
+            db.execute(
+                """
+                INSERT INTO active_trades(
+                    trade_id, symbol, label, direction, entry, sl, tp,
+                    initial_sl, current_sl, is_stop_order, triggered,
+                    be_alerted, last_trail_sl, highest_price, lowest_price,
+                    lot_size, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_id) DO UPDATE SET
+                    entry=excluded.entry,
+                    sl=excluded.sl,
+                    tp=excluded.tp,
+                    current_sl=excluded.current_sl,
+                    triggered=excluded.triggered,
+                    be_alerted=excluded.be_alerted,
+                    last_trail_sl=excluded.last_trail_sl,
+                    highest_price=excluded.highest_price,
+                    lowest_price=excluded.lowest_price,
+                    lot_size=excluded.lot_size,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    trade["trade_id"],
+                    trade["symbol"],
+                    trade["label"],
+                    trade["direction"],
+                    float(trade["entry"]),
+                    float(trade["sl"]),
+                    float(trade["tp"]),
+                    float(trade.get("initial_sl", trade["sl"])),
+                    float(trade.get("current_sl", trade["sl"])),
+                    1 if trade.get("is_stop_order", True) else 0,
+                    1 if trade.get("triggered", False) else 0,
+                    1 if trade.get("be_alerted", False) else 0,
+                    float(trade.get("last_trail_sl", 0.0)),
+                    float(trade.get("highest_price", trade["entry"])),
+                    float(trade.get("lowest_price", trade["entry"])),
+                    float(trade.get("lot_size", 0.01)),
+                    created,
+                    now,
+                ),
+            )
+
+    def get_active_trades(self, symbol: Optional[str] = None) -> list[dict[str, Any]]:
+        with self._connection() as db:
+            if symbol:
+                rows = db.execute(
+                    "SELECT * FROM active_trades WHERE symbol = ? ORDER BY created_at ASC",
+                    (symbol,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM active_trades ORDER BY created_at ASC"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def remove_active_trade(self, trade_id: str) -> None:
+        with self._connection() as db:
+            db.execute("DELETE FROM active_trades WHERE trade_id = ?", (trade_id,))

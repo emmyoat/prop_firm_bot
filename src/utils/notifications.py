@@ -193,24 +193,82 @@ class TelegramNotifier:
 
         return self.send_message(message, parse_mode="Markdown")
 
+    def send_breakeven_alert(
+        self,
+        symbol: str,
+        label: str,
+        direction: str,
+        entry: float,
+        current_price: float,
+        profit_pips: float,
+    ) -> bool:
+        """
+        Sends a clean Telegram alert instructing the user to move Stop Loss to Breakeven (Entry).
+        """
+        message = (
+            f"🛡️ *BREAKEVEN — {symbol}*\n"
+            f"*{label} Setup* | `{direction}`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📈 Price:   `{current_price:.2f}` (+{profit_pips:.0f} pips)\n"
+            f"🔒 Move SL: `{entry:.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━"
+        )
+        return self.send_message(message, parse_mode="Markdown")
+
     def send_trailing_stop_alert(
         self,
         symbol: str,
+        label: str,
         direction: str,
         new_sl: float,
-        comment: str = "Profits locked in!",
+        current_price: float,
+        locked_pips: float,
     ) -> bool:
         """
-        Sends a Telegram alert instructing the user to trail their Stop Loss.
+        Sends a clean Telegram alert instructing the user to trail their Stop Loss.
         """
-        icon = "🔄"
         message = (
-            f"{icon} *TRAIL STOP ALERT — {symbol}*\n"
+            f"🔄 *TRAIL STOP — {symbol}*\n"
+            f"*{label} Setup* | `{direction}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"Direction: `{direction}`\n"
-            f"🔒 Adjust SL to: `{new_sl:.5f}`\n"
+            f"📈 Price:   `{current_price:.2f}`\n"
+            f"🔒 Move SL: `{new_sl:.2f}` (+{locked_pips:.0f} pips)\n"
+            f"━━━━━━━━━━━━━━━━━━"
+        )
+        return self.send_message(message, parse_mode="Markdown")
+
+    def send_trade_closed_alert(
+        self,
+        symbol: str,
+        label: str,
+        direction: str,
+        exit_type: str,
+        entry: float,
+        exit_price: float,
+        pnl_pips: float,
+    ) -> bool:
+        """
+        Sends a clean Telegram alert when a trade hits TP, SL, or Trailing Stop.
+        """
+        is_win = pnl_pips > 0 or "TP" in exit_type
+        icon = "🎯" if is_win else "🛑"
+        if "TP" in exit_type:
+            title = "TAKE PROFIT HIT"
+        elif "TRAIL" in exit_type:
+            title = "TRAILING STOP HIT"
+        elif "BE" in exit_type:
+            title = "BREAKEVEN HIT"
+        else:
+            title = "STOP LOSS HIT"
+
+        message = (
+            f"{icon} *{title} — {symbol}*\n"
+            f"*{label} Setup* | `{direction}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"_{comment}_"
+            f"📍 Entry:  `{entry:.2f}`\n"
+            f"🏁 Exit:   `{exit_price:.2f}`\n"
+            f"📊 Result: `{pnl_pips:+.0f} pips`\n"
+            f"━━━━━━━━━━━━━━━━━━"
         )
         return self.send_message(message, parse_mode="Markdown")
 
@@ -243,6 +301,9 @@ class TelegramNotifier:
                 return data
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError,
                     requests.exceptions.HTTPError) as exc:
+                if response is not None and response.status_code == 409 and "getUpdates" in url:
+                    logger.debug("Telegram getUpdates skipped: another instance is active.")
+                    return None
                 retryable = not isinstance(exc, requests.exceptions.HTTPError) or (
                     response is not None
                     and (response.status_code == 429 or response.status_code >= 500)

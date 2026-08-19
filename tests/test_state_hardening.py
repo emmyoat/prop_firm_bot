@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from src.risk.risk_manager import RiskManager
 from src.utils.state_store import StateStore
@@ -50,10 +50,52 @@ def test_risk_state_survives_restart_and_rolls_over_utc_day(tmp_path):
     assert second.paper_pnl == 25.0
     assert second.daily_pnl == 25.0
 
-    changed = second.ensure_daily_rollover(
-        datetime(2026, 8, 19, 0, 1, tzinfo=timezone.utc)
-    )
+    tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
+    changed = second.ensure_daily_rollover(tomorrow)
     assert changed is True
     assert second.daily_pnl == 0.0
     assert second.signals_today == 0
     assert second.paper_pnl == 25.0
+
+
+def test_active_trade_lifecycle_persistence(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    trade = {
+        "trade_id": "XAUUSD_DAY_12345",
+        "symbol": "XAUUSD",
+        "label": "DAY",
+        "direction": "BUY",
+        "entry": 4350.0,
+        "sl": 4330.0,
+        "tp": 4410.0,
+        "initial_sl": 4330.0,
+        "current_sl": 4330.0,
+        "is_stop_order": True,
+        "triggered": False,
+        "be_alerted": False,
+        "last_trail_sl": 0.0,
+        "highest_price": 4350.0,
+        "lowest_price": 4350.0,
+        "lot_size": 0.01,
+    }
+
+    store.save_active_trade(trade)
+    trades = store.get_active_trades("XAUUSD")
+    assert len(trades) == 1
+    assert trades[0]["trade_id"] == "XAUUSD_DAY_12345"
+    assert trades[0]["entry"] == 4350.0
+
+    # Update trade with breakeven
+    trade["triggered"] = True
+    trade["be_alerted"] = True
+    trade["current_sl"] = 4350.0
+    store.save_active_trade(trade)
+
+    updated = store.get_active_trades("XAUUSD")[0]
+    assert updated["triggered"] == 1
+    assert updated["be_alerted"] == 1
+    assert updated["current_sl"] == 4350.0
+
+    # Remove trade upon exit
+    store.remove_active_trade("XAUUSD_DAY_12345")
+    assert len(store.get_active_trades()) == 0

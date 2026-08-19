@@ -201,6 +201,12 @@ def main():
                 time.sleep(900)
                 continue
 
+            # ── Active Trade Lifecycle Tracker (Breakeven & Trailing Alerts) ──
+            try:
+                _evaluate_active_trades(state_store, data_loader, notifier, config, logger)
+            except Exception as trade_err:
+                logger.error(f"Error evaluating active trades: {trade_err}")
+
             # ── Session filter ────────────────────────────────────────────────
             session_name = get_active_session(config)
             if not in_active_session(config):
@@ -229,6 +235,12 @@ def main():
                         sym_overrides = config["strategy"].get("symbol_overrides", {}).get(symbol, {})
                         allowed = sym_overrides.get("allowed_pairs")
                         if allowed and label not in allowed:
+                            continue
+
+                        # Check if a trade is already actively tracked for this symbol & timeframe label
+                        active_for_symbol = state_store.get_active_trades(symbol)
+                        if any(t.get("label") == label for t in active_for_symbol):
+                            logger.debug(f"[{label}] {symbol}: Active trade already open — skipping new signal scan.")
                             continue
 
                         # A. Fetch candle data
@@ -337,6 +349,29 @@ def main():
                         risk_manager.record_signal_sent()
                         logger.info(f"Signal sent: {symbol} {signal.signal_type.name} | R:R {rr:.2f} | Lot {lot_size}")
 
+                        # H. Register active trade in durable tracker for Breakeven & Trailing alerts
+                        trade_id = f"{symbol}_{label}_{int(time.time())}"
+                        state_store.save_active_trade({
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "label": label,
+                            "direction": signal.signal_type.name,
+                            "entry": signal.price,
+                            "sl": signal.sl_price,
+                            "tp": signal.tp_price,
+                            "initial_sl": signal.sl_price,
+                            "current_sl": signal.sl_price,
+                            "is_stop_order": signal.is_stop_order,
+                            "triggered": 0 if signal.is_stop_order else 1,
+                            "be_alerted": 0,
+                            "last_trail_sl": 0.0,
+                            "highest_price": signal.price,
+                            "lowest_price": signal.price,
+                            "lot_size": lot_size,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        })
+
                 except Exception as e:
                     import traceback
                     health.record_failure("scan_loop", f"{symbol}: {e}")
@@ -409,13 +444,10 @@ def _send_health_transition(notifier: TelegramNotifier, transition: dict, logger
     if logger is None:
         logger = logging.getLogger("PropBot")
     component = transition.get("component", "unknown")
-    status = transition.get("status", "unknown")
-    reason = transition.get("reason") or "status changed"
+    status    = transition.get("status", "unknown")
+    reason    = transition.get("reason") or "status changed"
+    # Log only — health transitions are operational noise, not user-facing alerts
     logger.warning("Health transition: %s=%s (%s)", component, status, reason)
-    if notifier.enabled and notifier.token and notifier.chat_id:
-        notifier.send_message(
-            f"*Health transition*\n`{component}`: *{status}*\n{reason}"
-        )
 
 
 def _send_performance_report(notifier: TelegramNotifier, stats_reporter, logger=None):
@@ -428,6 +460,154 @@ def _send_performance_report(notifier: TelegramNotifier, stats_reporter, logger=
             logger.info("Performance report sent.")
     except Exception as e:
         logger.error(f"Report failed: {e}")
+
+
+def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoader, notifier: TelegramNotifier, config: dict, logger=None):
+    if logger is None:
+        logger = logging.getLogger("PropBot")
+
+    trades = state_store.get_active_trades()
+    if not trades:
+        return
+
+    now_utc = datetime.now(timezone.utc)
+    risk_cfg = config.get("risk", {})
+    be_enabled = risk_cfg.get("breakeven_enabled", True)
+    be_pips = risk_cfg.get("breakeven_activation_pips", 100)
+    trail_enabled = risk_cfg.get("trailing_stop_enabled", True)
+    trail_activation_pips = risk_cfg.get("trailing_stop_activation_pips", 100)
+    trail_dist_pips = risk_cfg.get("trailing_stop_distance_pips", 40)
+    trail_step_pips = risk_cfg.get("trailing_step_pips", 40)
+    pending_expiry_hours = risk_cfg.get("pending_order_expiry_hours", 4)
+
+    for trade in trades:
+        symbol = trade["symbol"]
+        label = trade["label"]
+        trade_id = trade["trade_id"]
+        pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
+
+        # Fetch latest candle data (uses unified cache)
+        tf = "M15" if label == "SCALP" else ("H1" if label == "DAY" else "H4")
+        df = data_loader.fetch_data(symbol, tf, n_bars=100)
+        if df is None or df.empty:
+            continue
+
+        latest_bar = df.iloc[-1]
+        current_high = float(latest_bar["high"])
+        current_low = float(latest_bar["low"])
+        current_close = float(latest_bar["close"])
+        is_buy = trade["direction"] == "BUY"
+
+        # Check pending stop-order trigger
+        if trade.get("is_stop_order") and not trade.get("triggered"):
+            # Expiry check
+            try:
+                created_dt = datetime.fromisoformat(trade["created_at"])
+                if (now_utc - created_dt).total_seconds() > pending_expiry_hours * 3600:
+                    state_store.remove_active_trade(trade_id)
+                    logger.info(f"Pending order expired: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
+                    continue
+            except Exception:
+                pass
+
+            triggered = (is_buy and current_high >= trade["entry"]) or (not is_buy and current_low <= trade["entry"])
+            if triggered:
+                trade["triggered"] = 1
+                trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), current_close)
+                trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), current_close)
+                state_store.save_active_trade(trade)
+                logger.info(f"Pending order triggered: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
+            else:
+                continue
+
+        # Trade is actively open — track high/low excursion
+        trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), current_close)
+        trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), current_close)
+
+        profit_dist = (trade["highest_price"] - trade["entry"]) if is_buy else (trade["entry"] - trade["lowest_price"])
+        profit_pips = profit_dist / pip_unit
+
+        # ── 1. Breakeven Alert (Strictly Once at +100 pips) ───────────────────
+        if be_enabled and not trade.get("be_alerted") and profit_pips >= be_pips:
+            if notifier.enabled and notifier.token and notifier.chat_id:
+                notifier.send_breakeven_alert(
+                    symbol=symbol,
+                    label=label,
+                    direction=trade["direction"],
+                    entry=trade["entry"],
+                    current_price=current_close,
+                    profit_pips=profit_pips,
+                )
+            trade["be_alerted"] = 1
+            trade["current_sl"] = trade["entry"]
+            state_store.save_active_trade(trade)
+            logger.info(f"Breakeven alert sent: {symbol} [{label}] {trade['direction']} (+{profit_pips:.0f} pips)")
+
+        # ── 2. Trade Exit (TP / SL / Breakeven Hit) ───────────────────────────
+        if is_buy:
+            if current_close <= trade["current_sl"]:
+                exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
+                exit_price = trade["current_sl"]
+                pnl_pips = (exit_price - trade["entry"]) / pip_unit
+                if notifier.enabled and notifier.token and notifier.chat_id:
+                    notifier.send_trade_closed_alert(
+                        symbol=symbol,
+                        label=label,
+                        direction=trade["direction"],
+                        exit_type=exit_type,
+                        entry=trade["entry"],
+                        exit_price=exit_price,
+                        pnl_pips=pnl_pips,
+                    )
+                state_store.remove_active_trade(trade_id)
+                logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
+            elif trade["tp"] > 0 and current_close >= trade["tp"]:
+                exit_price = trade["tp"]
+                pnl_pips = (exit_price - trade["entry"]) / pip_unit
+                if notifier.enabled and notifier.token and notifier.chat_id:
+                    notifier.send_trade_closed_alert(
+                        symbol=symbol,
+                        label=label,
+                        direction=trade["direction"],
+                        exit_type="TP_HIT",
+                        entry=trade["entry"],
+                        exit_price=exit_price,
+                        pnl_pips=pnl_pips,
+                    )
+                state_store.remove_active_trade(trade_id)
+                logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
+        else:
+            if current_close >= trade["current_sl"]:
+                exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
+                exit_price = trade["current_sl"]
+                pnl_pips = (trade["entry"] - exit_price) / pip_unit
+                if notifier.enabled and notifier.token and notifier.chat_id:
+                    notifier.send_trade_closed_alert(
+                        symbol=symbol,
+                        label=label,
+                        direction=trade["direction"],
+                        exit_type=exit_type,
+                        entry=trade["entry"],
+                        exit_price=exit_price,
+                        pnl_pips=pnl_pips,
+                    )
+                state_store.remove_active_trade(trade_id)
+                logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
+            elif trade["tp"] > 0 and current_close <= trade["tp"]:
+                exit_price = trade["tp"]
+                pnl_pips = (trade["entry"] - exit_price) / pip_unit
+                if notifier.enabled and notifier.token and notifier.chat_id:
+                    notifier.send_trade_closed_alert(
+                        symbol=symbol,
+                        label=label,
+                        direction=trade["direction"],
+                        exit_type="TP_HIT",
+                        entry=trade["entry"],
+                        exit_price=exit_price,
+                        pnl_pips=pnl_pips,
+                    )
+                state_store.remove_active_trade(trade_id)
+                logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
 
 
 if __name__ == "__main__":

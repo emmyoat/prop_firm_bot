@@ -23,17 +23,20 @@ logger = logging.getLogger("PropBot.Risk")
 
 @dataclass
 class RiskConfig:
-    account_equity_risk_pct:   float
-    max_daily_loss_pct:        float
-    max_overall_drawdown_pct:  float
-    max_spread_points:         int
-    martingale_multiplier:     float
-    profit_target_daily_pct:   float
-    max_lot_size:              Optional[float] = 5.0
-    spread_limit_map:          Optional[dict]  = None
+    account_equity_risk_pct:       float
+    max_daily_loss_pct:            float
+    max_overall_drawdown_pct:      float
+    max_spread_points:             int
+    martingale_multiplier:         float
+    profit_target_daily_pct:       float
+    max_lot_size:                  Optional[float] = 5.0
+    spread_limit_map:              Optional[dict]  = None
+    breakeven_enabled:             Optional[bool] = True
+    breakeven_activation_pips:     Optional[int] = 100
     trailing_stop_enabled:         Optional[bool] = True
     trailing_stop_activation_pips: Optional[int] = 100
     trailing_stop_distance_pips:   Optional[int] = 40
+    trailing_step_pips:            Optional[int] = 40
     friday_exit_hour:              Optional[int] = 21
     min_trade_duration_seconds:    Optional[int] = 240
     pending_order_expiry_hours:    Optional[int] = 4
@@ -48,7 +51,10 @@ class RiskManager:
     """
 
     def __init__(self, config: dict, state_store: Optional[StateStore] = None):
-        self.config = RiskConfig(**config["risk"])
+        import inspect
+        valid_keys = inspect.signature(RiskConfig).parameters.keys()
+        filtered_risk = {k: v for k, v in config.get("risk", {}).items() if k in valid_keys}
+        self.config = RiskConfig(**filtered_risk)
 
         # Virtual paper account
         virtual_cfg = config.get("virtual_account", {})

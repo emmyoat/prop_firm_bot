@@ -56,10 +56,10 @@ risk:
   martingale_multiplier: 1.0       # 1.0 = No Martingale
   max_lot_size: 5.0
 
-  # Trailing Stop & Breakeven Alerts
-  trailing_stop_enabled: true
-  trailing_stop_activation_pips: 100    # $10.00 move on Gold (optimal balance of win rate & PnL)
-  trailing_stop_distance_pips: 40       # Trail SL $4.00 behind price
+  # Breakeven Alert (One-Time Alert at +100 pips)
+  breakeven_enabled: true
+  breakeven_activation_pips: 100        # Alert to move SL to entry at +100 pips ($10.00 on Gold)
+  trailing_stop_enabled: false          # Disabled — only initial signal and one-time breakeven alert
   friday_exit_hour: 21
   min_trade_duration_seconds: 240
   pending_order_expiry_hours: 4

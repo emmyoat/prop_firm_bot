@@ -237,6 +237,12 @@ def main():
                         if allowed and label not in allowed:
                             continue
 
+                        # Suppress duplicate signals if a trade is already open on this timeframe label
+                        active_for_symbol = state_store.get_active_trades(symbol)
+                        if any(t.get("label") == label for t in active_for_symbol):
+                            logger.debug(f"[{label}] {symbol}: Active trade already open — skipping duplicate scan.")
+                            continue
+
                         # A. Fetch candle data
                         df_low  = data_loader.fetch_data(symbol, tf_low,  n_bars=100)
                         df_high = data_loader.fetch_data(symbol, tf_high, n_bars=100)
@@ -255,12 +261,18 @@ def main():
                             )
                             continue
 
-                        # B. Generate signal — pass D1 as MacroTF gate for SCALP & DAY
+                        # B. Generate signal on closed candle — pass D1 as MacroTF gate
                         df_macro = None
                         if tf_high != "D1":
                             df_macro = data_loader.fetch_data(symbol, "D1", n_bars=100)
+
+                        # Evaluate on completed/closed candles to prevent repainting
+                        df_low_eval = df_low.iloc[:-1].copy() if len(df_low) > 2 else df_low
+                        df_high_eval = df_high.iloc[:-1].copy() if len(df_high) > 2 else df_high
+                        df_macro_eval = df_macro.iloc[:-1].copy() if (df_macro is not None and len(df_macro) > 2) else df_macro
+
                         signal = strategy.generate_signal(
-                            {"LowTF": df_low, "HighTF": df_high, "MacroTF": df_macro},
+                            {"LowTF": df_low_eval, "HighTF": df_high_eval, "MacroTF": df_macro_eval},
                             symbol, label=label
                         )
 
@@ -268,8 +280,8 @@ def main():
                             logger.debug(f"[{label}] {symbol}: No setup — {signal.comment}")
                             continue
 
-                        # C. Durable dedup claim — same candle, same label
-                        candle_time_str = str(df_low.iloc[-1]["time"])
+                        # C. Durable dedup claim — locked to closed candle timestamp
+                        candle_time_str = str(df_low_eval.iloc[-1]["time"])
                         dedup_key = f"{symbol}_{label}"
                         if not state_store.claim_signal(dedup_key, candle_time_str):
                             continue

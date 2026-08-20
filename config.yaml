@@ -26,9 +26,8 @@ virtual_account:
 # ── TwelveData API ───────────────────────────────────────────────────────────
 data_source:
   provider: "twelvedata"
-  api_key: ""               # Also loadable from TWELVEDATA_API_KEY in .env
-  cache_seconds: 300        # 5-min cache: ~720 calls/day across 15 active hours (tighter real-time precision)
-  max_stale_seconds: 600    # Fail closed after 10 minutes of stale market data
+  cache_seconds: 60         # 60s cache aligned with 60s scan loop (smooth, consistent 1-minute rhythm)
+  max_stale_seconds: 300    # Fail closed after 5 minutes of stale market data
   min_request_gap_seconds: 8
   requests_per_minute: 8
   daily_request_limit: 800
@@ -111,7 +110,7 @@ strategy:
 # ── Runtime & Health ───────────────────────────────────────────────────────────
 runtime:
   state_db_path: "runtime_state.db"
-  scan_interval_seconds: 5
+  scan_interval_seconds: 60             # Smooth, consistent 1-minute scan heartbeat
 
 health:
   loop_stale_seconds: 120

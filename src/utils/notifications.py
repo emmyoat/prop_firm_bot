@@ -338,6 +338,6 @@ class TelegramNotifier:
         self.session.close()
 
     def _redact(self, text: str) -> str:
-        if self.token and text:
+        if self.token and isinstance(self.token, str) and text:
             return str(text).replace(self.token, "******")
         return str(text)

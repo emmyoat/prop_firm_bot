@@ -121,7 +121,8 @@ class StateStore:
                     is_stop_order INTEGER NOT NULL DEFAULT 1,
                     triggered INTEGER NOT NULL DEFAULT 0,
                     be_alerted INTEGER NOT NULL DEFAULT 0,
-                    last_trail_sl REAL NOT NULL DEFAULT 0,
+                    last_trail_
+                    sl REAL NOT NULL DEFAULT 0,
                     highest_price REAL NOT NULL,
                     lowest_price REAL NOT NULL,
                     lot_size REAL NOT NULL DEFAULT 0.01,

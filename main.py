@@ -237,12 +237,6 @@ def main():
                         if allowed and label not in allowed:
                             continue
 
-                        # Check if a trade is already actively tracked for this symbol & timeframe label
-                        active_for_symbol = state_store.get_active_trades(symbol)
-                        if any(t.get("label") == label for t in active_for_symbol):
-                            logger.debug(f"[{label}] {symbol}: Active trade already open — skipping new signal scan.")
-                            continue
-
                         # A. Fetch candle data
                         df_low  = data_loader.fetch_data(symbol, tf_low,  n_bars=100)
                         df_high = data_loader.fetch_data(symbol, tf_high, n_bars=100)
@@ -545,7 +539,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
 
         # ── 2. Trade Exit (TP / SL / Breakeven Hit) ───────────────────────────
         if is_buy:
-            if current_close <= trade["current_sl"]:
+            if current_low <= trade["current_sl"]:
                 exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                 exit_price = trade["current_sl"]
                 pnl_pips = (exit_price - trade["entry"]) / pip_unit
@@ -561,7 +555,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     )
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
-            elif trade["tp"] > 0 and current_close >= trade["tp"]:
+            elif trade["tp"] > 0 and current_high >= trade["tp"]:
                 exit_price = trade["tp"]
                 pnl_pips = (exit_price - trade["entry"]) / pip_unit
                 if notifier.enabled and notifier.token and notifier.chat_id:
@@ -577,7 +571,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
         else:
-            if current_close >= trade["current_sl"]:
+            if current_high >= trade["current_sl"]:
                 exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                 exit_price = trade["current_sl"]
                 pnl_pips = (trade["entry"] - exit_price) / pip_unit
@@ -593,7 +587,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     )
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
-            elif trade["tp"] > 0 and current_close <= trade["tp"]:
+            elif trade["tp"] > 0 and current_low <= trade["tp"]:
                 exit_price = trade["tp"]
                 pnl_pips = (trade["entry"] - exit_price) / pip_unit
                 if notifier.enabled and notifier.token and notifier.chat_id:

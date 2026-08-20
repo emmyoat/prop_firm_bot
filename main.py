@@ -523,6 +523,9 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
 
         # ── 1. Breakeven Alert (Strictly Once at +100 pips) ───────────────────
         if be_enabled and not trade.get("be_alerted") and profit_pips >= be_pips:
+            trade["be_alerted"] = 1
+            trade["current_sl"] = trade["entry"]
+            state_store.save_active_trade(trade)
             if notifier.enabled and notifier.token and notifier.chat_id:
                 notifier.send_breakeven_alert(
                     symbol=symbol,
@@ -532,9 +535,6 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     current_price=current_close,
                     profit_pips=profit_pips,
                 )
-            trade["be_alerted"] = 1
-            trade["current_sl"] = trade["entry"]
-            state_store.save_active_trade(trade)
             logger.info(f"Breakeven alert sent: {symbol} [{label}] {trade['direction']} (+{profit_pips:.0f} pips)")
 
         # ── 2. Trade Exit (TP / SL / Breakeven Hit) ───────────────────────────

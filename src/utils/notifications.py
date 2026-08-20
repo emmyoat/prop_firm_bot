@@ -203,14 +203,16 @@ class TelegramNotifier:
         profit_pips: float,
     ) -> bool:
         """
-        Sends a clean Telegram alert instructing the user to move Stop Loss to Breakeven (Entry).
+        Sends a clean Telegram alert instructing the user to move SL to entry (Breakeven).
         """
         message = (
-            f"🛡️ *BREAKEVEN — {symbol}*\n"
+            f"🛡️ *MOVE SL TO BREAKEVEN — {symbol}*\n"
             f"*{label} Setup* | `{direction}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📈 Price:   `{current_price:.2f}` (+{profit_pips:.0f} pips)\n"
-            f"🔒 Move SL: `{entry:.2f}`\n"
+            f"📍 Entry Price: `{entry:.2f}`\n"
+            f"📈 Live Price:  `{current_price:.2f}` (+{profit_pips:.0f} pips)\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🔒 *Action:* Move SL to `{entry:.2f}` "
             f"━━━━━━━━━━━━━━━━━━"
         )
         return self.send_message(message, parse_mode="Markdown")
@@ -231,8 +233,8 @@ class TelegramNotifier:
             f"🔄 *TRAIL STOP — {symbol}*\n"
             f"*{label} Setup* | `{direction}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📈 Price:   `{current_price:.2f}`\n"
-            f"🔒 Move SL: `{new_sl:.2f}` (+{locked_pips:.0f} pips)\n"
+            f"📈 Live Price:  `{current_price:.2f}`\n"
+            f"🔒 New SL:     `{new_sl:.2f}` (+{locked_pips:.0f} pips locked)\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
         return self.send_message(message, parse_mode="Markdown")
@@ -248,26 +250,32 @@ class TelegramNotifier:
         pnl_pips: float,
     ) -> bool:
         """
-        Sends a clean Telegram alert when a trade hits TP, SL, or Trailing Stop.
+        Sends a clean Telegram alert when a trade hits TP, SL, or Breakeven.
         """
-        is_win = pnl_pips > 0 or "TP" in exit_type
-        icon = "🎯" if is_win else "🛑"
         if "TP" in exit_type:
+            icon = "🎯"
             title = "TAKE PROFIT HIT"
-        elif "TRAIL" in exit_type:
-            title = "TRAILING STOP HIT"
+            outcome = "WIN"
         elif "BE" in exit_type:
-            title = "BREAKEVEN HIT"
+            icon = "🛡️"
+            title = "CLOSED AT BREAKEVEN"
+            outcome = "NO LOSS (RISK-FREE)"
+        elif "TRAIL" in exit_type:
+            icon = "💰"
+            title = "TRAILING STOP HIT"
+            outcome = "PROFIT LOCKED"
         else:
+            icon = "🛑"
             title = "STOP LOSS HIT"
+            outcome = "LOSS"
 
         message = (
             f"{icon} *{title} — {symbol}*\n"
             f"*{label} Setup* | `{direction}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"📍 Entry:  `{entry:.2f}`\n"
-            f"🏁 Exit:   `{exit_price:.2f}`\n"
-            f"📊 Result: `{pnl_pips:+.0f} pips`\n"
+            f"📍 Entry Price: `{entry:.2f}`\n"
+            f"🏁 Exit Price:  `{exit_price:.2f}`\n"
+            f"📊 PnL Result:  `{pnl_pips:+.0f} pips` ({outcome})\n"
             f"━━━━━━━━━━━━━━━━━━"
         )
         return self.send_message(message, parse_mode="Markdown")

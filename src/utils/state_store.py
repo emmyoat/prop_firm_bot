@@ -37,10 +37,16 @@ class StateStore:
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(str(self.path), timeout=10.0)
+        connection = sqlite3.connect(str(self.path), timeout=30.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        connection.execute("PRAGMA busy_timeout = 30000")
+        connection.execute("PRAGMA temp_store = MEMORY")
+        try:
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.execute("PRAGMA synchronous = NORMAL")
+        except Exception:
+            pass
         try:
             yield connection
             connection.commit()
@@ -214,17 +220,20 @@ class StateStore:
         return int(row["last_update_id"]) if row else 0
 
     def save_telegram_offset(self, update_id: int, state_key: str = "default") -> None:
-        with self._connection() as db:
-            db.execute(
-                """
-                INSERT INTO telegram_state(state_key, last_update_id, updated_at)
-                VALUES(?, ?, ?)
-                ON CONFLICT(state_key) DO UPDATE SET
-                    last_update_id=excluded.last_update_id,
-                    updated_at=excluded.updated_at
-                """,
-                (state_key, int(update_id), utc_now()),
-            )
+        try:
+            with self._connection() as db:
+                db.execute(
+                    """
+                    INSERT INTO telegram_state(state_key, last_update_id, updated_at)
+                    VALUES(?, ?, ?)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        last_update_id=excluded.last_update_id,
+                        updated_at=excluded.updated_at
+                    """,
+                    (state_key, int(update_id), utc_now()),
+                )
+        except Exception as err:
+            logger.warning(f"Could not persist Telegram offset: {err}")
 
     def set_runtime_value(self, key: str, value: Any) -> None:
         serialized = json.dumps(value, sort_keys=True)

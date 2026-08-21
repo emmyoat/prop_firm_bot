@@ -5,7 +5,7 @@ Prop Firm Signal Bot — main.py
   • Signal output → Telegram alerts + console log
   • Risk engine   → Virtual paper account (configured in config.yaml)
 """
-
+import pandas as pd
 import time
 import argparse
 import os
@@ -548,14 +548,32 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             else:
                 continue
 
-        # Trade is actively open — track high/low excursion
-        trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), current_close)
-        trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), current_close)
+        # Trade is actively open — check historical bars since entry (handles downtime catch-up)
+        try:
+            created_dt = datetime.fromisoformat(trade["created_at"])
+            if created_dt.tzinfo is not None:
+                created_dt = created_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            # Find all candle bars that occurred since trade was created
+            candle_times = pd.to_datetime(df["time"])
+            if candle_times.dt.tz is not None:
+                candle_times = candle_times.dt.tz_convert(None)
+            df_since = df[candle_times >= created_dt]
+            if not df_since.empty:
+                period_high = float(df_since["high"].max())
+                period_low = float(df_since["low"].min())
+                trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), period_high, current_close)
+                trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), period_low, current_close)
+            else:
+                trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), current_close)
+                trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), current_close)
+        except Exception:
+            trade["highest_price"] = max(trade.get("highest_price", trade["entry"]), current_close)
+            trade["lowest_price"] = min(trade.get("lowest_price", trade["entry"]), current_close)
 
         profit_dist = (trade["highest_price"] - trade["entry"]) if is_buy else (trade["entry"] - trade["lowest_price"])
         profit_pips = profit_dist / pip_unit
 
-        # ── 1. Breakeven Alert (Strictly Once at +100 pips) ───────────────────
+        # ── 1. Breakeven Alert (Strictly Once at configured activation pips) ──
         if be_enabled and not trade.get("be_alerted") and profit_pips >= be_pips:
             trade["be_alerted"] = 1
             trade["current_sl"] = trade["entry"]
@@ -571,9 +589,25 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                 )
             logger.info(f"Breakeven alert sent: {symbol} [{label}] {trade['direction']} (+{profit_pips:.0f} pips)")
 
-        # ── 2. Trade Exit (TP / SL / Breakeven Hit on Live Price) ────────────
+        # ── 2. Trade Exit (TP Hit on Excursion / SL / Breakeven Hit) ──────────
         if is_buy:
-            if current_close <= trade["current_sl"]:
+            # Check TP hit first (including any wick that touched TP while bot was off)
+            if trade["tp"] > 0 and (current_close >= trade["tp"] or trade["highest_price"] >= trade["tp"]):
+                exit_price = trade["tp"]
+                pnl_pips = (exit_price - trade["entry"]) / pip_unit
+                if notifier.enabled and notifier.token and notifier.chat_id:
+                    notifier.send_trade_closed_alert(
+                        symbol=symbol,
+                        label=label,
+                        direction=trade["direction"],
+                        exit_type="TP_HIT",
+                        entry=trade["entry"],
+                        exit_price=exit_price,
+                        pnl_pips=pnl_pips,
+                    )
+                state_store.remove_active_trade(trade_id)
+                logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
+            elif current_close <= trade["current_sl"]:
                 exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                 exit_price = trade["current_sl"]
                 pnl_pips = (exit_price - trade["entry"]) / pip_unit
@@ -589,9 +623,11 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     )
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
-            elif trade["tp"] > 0 and current_close >= trade["tp"]:
+        else:
+            # SELL side TP check
+            if trade["tp"] > 0 and (current_close <= trade["tp"] or trade["lowest_price"] <= trade["tp"]):
                 exit_price = trade["tp"]
-                pnl_pips = (exit_price - trade["entry"]) / pip_unit
+                pnl_pips = (trade["entry"] - exit_price) / pip_unit
                 if notifier.enabled and notifier.token and notifier.chat_id:
                     notifier.send_trade_closed_alert(
                         symbol=symbol,
@@ -604,8 +640,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     )
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
-        else:
-            if current_close >= trade["current_sl"]:
+            elif current_close >= trade["current_sl"]:
                 exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                 exit_price = trade["current_sl"]
                 pnl_pips = (trade["entry"] - exit_price) / pip_unit

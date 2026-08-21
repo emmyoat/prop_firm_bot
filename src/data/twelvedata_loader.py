@@ -77,10 +77,27 @@ class TwelveDataLoader:
         source_cfg = config.get("data_source", {})
         retry_cfg = source_cfg.get("retry", {})
 
-        # In-memory cache: (symbol, timeframe, n_bars) -> (timestamp, DataFrame)
+        # In-memory cache: (symbol, timeframe) -> (timestamp, DataFrame)
         self._cache: dict = {}
         self._cache_ttl = float(source_cfg.get("cache_seconds", 60))
-        self._max_stale_seconds = float(source_cfg.get("max_stale_seconds", self._cache_ttl))
+        self._max_stale_seconds = float(source_cfg.get("max_stale_seconds", 600))
+        
+        # Adaptive Timeframe TTL: higher timeframes change much slower than M15
+        default_ttls = {
+            "D1": 14400.0,  # 4 hours (Daily trend changes once a day)
+            "H4": 3600.0,   # 1 hour (4-hour candle changes 6 times a day)
+            "H1": 600.0,    # 10 minutes
+            "M15": 180.0,   # 3 minutes (fast real-time scalp updates)
+            "M5": 60.0,     # 1 minute
+        }
+        if "timeframe_cache_seconds" in source_cfg:
+            custom_ttls = source_cfg.get("timeframe_cache_seconds", {})
+            self._timeframe_ttls = {k.upper(): float(v) for k, v in {**default_ttls, **custom_ttls}.items()}
+        elif "cache_seconds" in source_cfg:
+            # If explicit global cache_seconds is set without timeframe overrides (e.g. in tests)
+            self._timeframe_ttls = {k.upper(): self._cache_ttl for k in default_ttls}
+        else:
+            self._timeframe_ttls = {k.upper(): float(v) for k, v in default_ttls.items()}
 
         self._min_request_gap = float(source_cfg.get("min_request_gap_seconds", 8.0))
         self._requests_per_minute = int(source_cfg.get("requests_per_minute", 8))
@@ -167,6 +184,15 @@ class TwelveDataLoader:
         self.metrics["daily_requests"] = self._daily_request_count
         return True
 
+    def is_daily_budget_exhausted(self) -> bool:
+        """Check if daily request budget is currently exhausted without incrementing counter."""
+        current_date = self._utc_date()
+        if current_date != self._daily_request_date:
+            self._daily_request_date = current_date
+            self._daily_request_count = 0
+            self.metrics["daily_requests"] = 0
+        return self._daily_request_count >= self._daily_request_limit
+
     def _request_json(self, endpoint: str, params: Optional[dict] = None) -> Optional[dict]:
         """Perform a classified, rate-limited request with bounded retries."""
         url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
@@ -193,6 +219,10 @@ class TwelveDataLoader:
                 if data.get("status") == "error":
                     code = int(data.get("code", 0) or 0)
                     message = str(data.get("message", "provider error"))
+                    if "daily" in message.lower() or "800" in message:
+                        self._daily_request_count = self._daily_request_limit
+                        self._record_failure(f"Daily API limit reached: {message}")
+                        return None
                     if code == 429 or "rate limit" in message.lower():
                         raise requests.exceptions.HTTPError(message, response=response)
                     self._record_failure(message)
@@ -242,11 +272,12 @@ class TwelveDataLoader:
         now = self._clock()
 
         # Return cached data if still fresh and has sufficient bars
+        tf_ttl = self._timeframe_ttls.get(timeframe.upper(), self._cache_ttl)
         if cache_key in self._cache:
             cached_at, df = self._cache[cache_key]
-            if now - cached_at < self._cache_ttl and len(df) >= min(n_bars, 20):
+            if now - cached_at < tf_ttl and len(df) >= min(n_bars, 20):
                 self.metrics["cache_hits"] += 1
-                logger.debug(f"TwelveData: Cache hit for {symbol} {timeframe}")
+                logger.debug(f"TwelveData: Cache hit for {symbol} {timeframe} (TTL {tf_ttl:.0f}s)")
                 return df.tail(n_bars).copy()
 
         td_symbol = self._to_td_symbol(symbol)

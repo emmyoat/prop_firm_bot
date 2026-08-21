@@ -9,6 +9,8 @@ Prop Firm Signal Bot — main.py
 import time
 import argparse
 import os
+import sys
+import socket
 import logging
 from datetime import datetime, timezone
 
@@ -24,6 +26,17 @@ from src.utils.stats import StatsReporter
 from src.utils.journal import TradeJournal
 import src.models as models
 from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
+
+
+def acquire_single_instance_lock(port: int = 49281):
+    """Binds a local socket to guarantee only ONE instance of the bot runs at a time."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", port))
+        return sock
+    except OSError:
+        print("[ERROR] Another instance of Prop Firm Signal Bot is already running. Exiting.")
+        sys.exit(0)
 
 
 # ── Tick-value estimates for lot sizing without MT5 ───────────────────────────
@@ -87,6 +100,9 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml")
     parser.add_argument("--env",    type=str, default=".env")
     args = parser.parse_args()
+
+    # ── Single Instance Lock ──────────────────────────────────────────────────
+    _instance_lock = acquire_single_instance_lock()
 
     # ── Config & logging ──────────────────────────────────────────────────────
     config = load_config(args.config)
@@ -174,6 +190,12 @@ def main():
                 _send_health_transition(notifier, transition, logger)
             # Keep fetching while degraded or unhealthy so the data source can
             # recover. Failed fetches below suppress signal processing naturally.
+            # ── Daily API Budget Check ─────────────────────────────────────────
+            if hasattr(data_loader, "is_daily_budget_exhausted") and data_loader.is_daily_budget_exhausted():
+                logger.warning("TwelveData daily API limit reached (800). Sleeping 5 mins until UTC midnight reset...")
+                time.sleep(300)
+                continue
+
             # ── Friday close check ────────────────────────────────────────────
             if is_friday_close(config):
                 logger.warning("FRIDAY EXIT: Halting new signals for the weekend.")

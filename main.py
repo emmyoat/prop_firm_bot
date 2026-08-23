@@ -155,7 +155,7 @@ def main():
     )
 
     if tg_token and tg_chat_id:
-        logger.info(f"Telegram alerts enabled (Chat ID: {tg_chat_id})")
+        logger.info(f"Telegram alerts enabled (Chat ID: ...{str(tg_chat_id)[-4:]})") 
         notifier.send_message("⚡ *PropBot Signal Engine Started*")
     else:
         logger.warning("Telegram token/chat_id missing — notifications disabled.")
@@ -465,7 +465,7 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
         )
         logger.info("Telegram /stats requested")
     else:
-        notifier.send_message(f"Unknown command: `{cmd}`\nType /help for the menu.")
+        notifier.send_message("Unknown command. Type /help for the menu.")
 
 
 def _send_health_transition(notifier: TelegramNotifier, transition: dict, logger=None):

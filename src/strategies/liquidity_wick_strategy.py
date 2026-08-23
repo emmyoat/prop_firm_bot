@@ -199,8 +199,7 @@ class LiquidityWickStrategy(Strategy):
             # Instead of entering at Market, we place a STOP order at the wick extreme.
             
             is_stop_order = True
-            is_limit = False
-            
+
             last_candle = df_entry.iloc[-1]
             
             # --- VOLATILITY-BASED RISK (ATR) ---
@@ -255,12 +254,7 @@ class LiquidityWickStrategy(Strategy):
             tp_price = self._find_target(df_entry, signal_type, price, stop_loss)
 
 
-            # Check Risk:Reward Ratio (Informational Only)
-            risk = abs(price - stop_loss)
-            reward = abs(tp_price - price)
-            rr_ratio = reward / risk if risk > 0 else 0
-
-            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_limit_order=is_limit, is_stop_order=is_stop_order, comment="Liquidity Wick Sweep")
+            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_stop_order=is_stop_order, comment="Liquidity Wick Sweep")
 
         return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0)
 

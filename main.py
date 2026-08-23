@@ -656,21 +656,6 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     )
                 state_store.remove_active_trade(trade_id)
                 logger.info(f"Trade closed: {symbol} [{label}] {exit_type} @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
-            elif trade["tp"] > 0 and current_close <= trade["tp"]:
-                exit_price = trade["tp"]
-                pnl_pips = (trade["entry"] - exit_price) / pip_unit
-                if notifier.enabled and notifier.token and notifier.chat_id:
-                    notifier.send_trade_closed_alert(
-                        symbol=symbol,
-                        label=label,
-                        direction=trade["direction"],
-                        exit_type="TP_HIT",
-                        entry=trade["entry"],
-                        exit_price=exit_price,
-                        pnl_pips=pnl_pips,
-                    )
-                state_store.remove_active_trade(trade_id)
-                logger.info(f"Trade closed: {symbol} [{label}] TP_HIT @ {exit_price:.2f} ({pnl_pips:+.0f} pips)")
 
 
 if __name__ == "__main__":

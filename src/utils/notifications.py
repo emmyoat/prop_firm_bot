@@ -169,24 +169,13 @@ class TelegramNotifier:
         dir_emoji = "⬆️" if direction == "BUY" else "⬇️"
         chart_url = get_chart_link(symbol, timeframe)
 
-        # Risk/Reward quality label
-        if rr >= 3.0:
-            rr_label = "🏆 Excellent"
-        elif rr >= 2.0:
-            rr_label = "✅ Good"
-        elif rr >= 1.5:
-            rr_label = "⚠️ Acceptable"
-        else:
-            rr_label = "❗ Low"
-
         message = (
             f"{icon} *{direction} SIGNAL — {symbol}*\n"
-            f"{dir_emoji} *{label} Setup* | TF: `{timeframe}`\n"
+            f"{dir_emoji} *{label} Setup* \n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📍 Entry:  `{entry:.5f}`\n"
             f"🛑 SL:     `{sl:.5f}`\n"
             f"🎯 TP:     `{tp:.5f}`\n"
-            f"💼 Lot:    `{lot_size}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"[📈 View Chart on TradingView]({chart_url})"
         )

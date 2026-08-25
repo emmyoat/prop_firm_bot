@@ -303,23 +303,23 @@ class LiquidityWickStrategy(Strategy):
         Finds the Take Profit target.
         Hybrid Approach:
         1. Identify Structural Target (Peak High/Low).
-        2. Identify Conservative Target (e.g., 2.0R or 3.0R).
-        3. Take the CLOSER of the two. This respects structure but prevents "Greedy" targets that reduce Win Rate.
+        2. Enforce Minimum R:R Floor (e.g., at least 3.0R if structure is too close).
+        3. Cap at Conservative Max R:R (e.g., 5.0R).
         """
         # Look back for Structure
         window = df.iloc[-self.lookback:-1]
         
-        structure_target = 0.0
         risk = abs(entry_price - sl_price)
-        if risk == 0: risk = 0.0010 # Fallback 10 pips equivalent
+        if risk == 0:
+            risk = 0.0010  # Fallback 10 pips equivalent
         
-        # Max R:R Cap (Relaxed to 5.0 to allow dynamic structure targeting)
-        max_rr = 5.0 
-        conservative_target = 0.0
+        # Minimum R:R floor (at least 3.0R) and Max R:R Cap
+        min_rr = self.risk_reward_ratio if self.risk_reward_ratio > 0 else 3.0
+        max_rr = self.config['strategy'].get('max_risk_reward_ratio', 5.0)
 
         # Check for Infinite TP (Runner Mode)
         if self.config['strategy'].get('infinite_tp', False):
-            return 0.0 # No TP, let Trail Stop handle it
+            return 0.0  # No TP, let Trail Stop handle it
 
         if self.config['strategy'].get('tp_mode') == 'fixed_rr':
             rr = self.risk_reward_ratio
@@ -329,27 +329,29 @@ class LiquidityWickStrategy(Strategy):
                 return entry_price - (risk * rr)
 
         if signal_type == SignalType.BUY:
-            # 1. Structural
+            min_target = entry_price + (risk * min_rr)
+            max_target = entry_price + (risk * max_rr)
             structure_target = window['high'].max()
-            if structure_target <= entry_price: structure_target = entry_price + (risk * 2) # Fallback
 
-            # 2. Conservative Cap
-            conservative_target = entry_price + (risk * max_rr)
-            
-            # 3. Decision: Take the closer one
-            return min(structure_target, conservative_target)
+            if structure_target <= entry_price:
+                return min_target
+
+            # If structure is too close (< min_rr, e.g. 0.73R), enforce at least 3.0R (min_target)
+            # Capped at max_rr (5.0R)
+            return min(max(structure_target, min_target), max_target)
         
         elif signal_type == SignalType.SELL:
-            # 1. Structural
+            min_target = entry_price - (risk * min_rr)
+            max_target = entry_price - (risk * max_rr)
             structure_target = window['low'].min()
-            if structure_target >= entry_price: structure_target = entry_price - (risk * 2)
 
-            # 2. Conservative Cap
-            conservative_target = entry_price - (risk * max_rr)
-            
-            # 3. Decision: Take the closer one (Highest value for sell relative to price? No, 'min' distance)
-            # For SELL, 'closer' means HIGHER price (less drop required).
-            return max(structure_target, conservative_target)
+            if structure_target >= entry_price:
+                return min_target
+
+            # For SELL, lower price = more profit.
+            # If structure is too close (higher than min_target), enforce at least 3.0R (min_target)
+            # Capped at max_rr (max_target)
+            return max(min(structure_target, min_target), max_target)
         
         return 0.0
 

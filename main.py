@@ -116,7 +116,11 @@ def main():
 
     # ── Durable state and health ───────────────────────────────────────────────
     runtime_cfg = config.get("runtime", {})
-    state_store = StateStore(runtime_cfg.get("state_db_path", "runtime_state.db"))
+    state_db_path = (
+        os.environ.get("STATE_DB_PATH")
+        or runtime_cfg.get("state_db_path", "runtime_state.db")
+    )
+    state_store = StateStore(state_db_path)
     if not state_store.integrity_check():
         raise RuntimeError("Runtime state database failed integrity check")
     health = HealthMonitor(state_store, config)

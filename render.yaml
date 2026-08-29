@@ -4,8 +4,12 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    plan: free
+    plan: starter
     autoDeploy: true
+    disk:
+      name: bot-state
+      mountPath: /data
+      sizeGB: 1
     envVars:
       - key: TWELVEDATA_API_KEY
         sync: false
@@ -13,3 +17,5 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: STATE_DB_PATH
+        value: /data/runtime_state.db

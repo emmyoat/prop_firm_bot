@@ -176,6 +176,7 @@ def main():
 
     # ── News & journal ────────────────────────────────────────────────────────
     stats_reporter = StatsReporter(config["system"]["magic_number"])
+    journal = TradeJournal("trades.csv")
     last_report_time = time.time()
 
     symbols      = config["system"]["symbol_list"]
@@ -229,7 +230,7 @@ def main():
 
             # ── Active Trade Lifecycle Tracker (Breakeven & Trailing Alerts) ──
             try:
-                _evaluate_active_trades(state_store, data_loader, notifier, config, logger)
+                _evaluate_active_trades(state_store, data_loader, notifier, config, risk_manager, journal, session_name, logger)
             except Exception as trade_err:
                 logger.error(f"Error evaluating active trades: {trade_err}")
 
@@ -298,7 +299,7 @@ def main():
                         df_macro_eval = df_macro.iloc[:-1].copy() if (df_macro is not None and len(df_macro) > 2) else df_macro
 
                         signal = strategy.generate_signal(
-                            {"LowTF": df_low_eval, "HighTF": df_high_eval, "MacroTF": df_macro_eval},
+                            {"LowTF": df_low_eval, "HighTF": df_high_eval, "MacroTF": df_macro_eval, "session_name": session_name},
                             symbol, label=label
                         )
 
@@ -494,7 +495,7 @@ def _send_performance_report(notifier: TelegramNotifier, stats_reporter, logger=
         logger.error(f"Report failed: {e}")
 
 
-def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoader, notifier: TelegramNotifier, config: dict, logger=None):
+def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoader, notifier: TelegramNotifier, config: dict, risk_manager: RiskManager = None, journal: TradeJournal = None, session_name: str = "", logger=None):
     if logger is None:
         logger = logging.getLogger("PropBot")
 
@@ -706,6 +707,31 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
 
             if exit_type and exit_price is not None:
                 pnl_pips = (exit_price - trade["entry"]) / pip_unit if is_buy else (trade["entry"] - exit_price) / pip_unit
+
+                # Record paper PnL in risk manager
+                if risk_manager is not None:
+                    try:
+                        lot_size = float(trade.get("lot_size", 0.01))
+                        tick_value = TICK_VALUE_MAP.get(symbol, 10.0)
+                        tick_size = TICK_SIZE_MAP.get(symbol, 0.0001)
+                        pnl_usd = (pnl_pips * pip_unit / tick_size) * tick_value * lot_size if tick_size > 0 else 0.0
+                        risk_manager.record_paper_trade(pnl_usd)
+                    except Exception as pnl_err:
+                        logger.warning(f"Could not record paper PnL: {pnl_err}")
+
+                # Log trade to CSV journal
+                if journal is not None:
+                    try:
+                        journal.log_virtual_trade(
+                            trade=trade,
+                            exit_type=exit_type,
+                            exit_price=exit_price,
+                            pnl_pips=pnl_pips,
+                            session=session_name,
+                        )
+                    except Exception as jrn_err:
+                        logger.warning(f"Could not log to journal: {jrn_err}")
+
                 if notifier.enabled and notifier.token and notifier.chat_id:
                     notifier.send_trade_closed_alert(
                         symbol=symbol,

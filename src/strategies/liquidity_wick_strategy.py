@@ -17,6 +17,7 @@ class LiquidityWickStrategy(Strategy):
         self.sma_period = config['strategy'].get('sma_period', 50)
         self.risk_reward_ratio = config['strategy'].get('risk_reward_ratio', 3.0)
         self.require_trend_alignment = False   # Per-symbol: require both TFs to agree
+        self.allow_entry_trend_only = False     # Per-symbol: relax alignment — follow entry TF if D1 macro agrees
         self.rsi_confirmation = False           # Per-symbol: RSI momentum filter
 
     def generate_signal(self, data: dict, symbol: str, label: str = "") -> Signal:
@@ -63,8 +64,18 @@ class LiquidityWickStrategy(Strategy):
             current_trend = SignalType.SELL
         else:
              if self.require_trend_alignment:
-                 return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Trend Misalignment")
-             current_trend = trend_entry
+                 if self.allow_entry_trend_only:
+                     # Relaxed mode: follow entry TF direction — D1 macro gate below
+                     # will still block genuinely counter-trend signals.
+                     current_trend = trend_entry
+                     logger.debug(
+                         f"{symbol} [{label}] Trend misalignment (Major={trend_major.name}, "
+                         f"Entry={trend_entry.name}) — using entry TF (allow_entry_trend_only)"
+                     )
+                 else:
+                     return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Trend Misalignment")
+             else:
+                 current_trend = trend_entry
 
         # ── D1 Macro Trend Gate ───────────────────────────────────────────────
         # Uses EMA-20 on D1 — faster than SMA-50, prevents counter-trend signals
@@ -212,7 +223,15 @@ class LiquidityWickStrategy(Strategy):
             if "XAU" in symbol and atr_multiplier > 0.5:
                  atr_multiplier = 0.5
                  logger.info(f"DEBUG: {symbol} Forced ATR to 0.5 (Was {atr_multiplier})")
-                 
+
+            # ── Session-specific ATR adjustment ──────────────────────────
+            session_name = data.get("session_name", "")
+            session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
+            if session_name and session_name in session_atr_map:
+                session_factor = session_atr_map[session_name]
+                atr_multiplier *= session_factor
+                logger.info(f"DEBUG: {symbol} Session ATR: {session_name} factor={session_factor} → adjusted={atr_multiplier:.4f}")
+
             logger.info(f"DEBUG: {symbol} ATR Multiplier Lookup: Pct={atr_multiplier} (Map={multiplier_map})")
 
             entry_multiplier = self.config['strategy'].get('entry_atr_multiplier', 0.1)

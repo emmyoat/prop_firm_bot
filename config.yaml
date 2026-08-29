@@ -96,7 +96,7 @@ strategy:
   news_blocked_times: []
 
   # SMC Filter (Order Block + FVG Confluence)
-  smc_filter_enabled: false
+  smc_filter_enabled: true
   smc_min_confluence_score: 20
 
   # Active timeframe pairs to scan
@@ -105,12 +105,23 @@ strategy:
     - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }
 
+  # Session-specific ATR multipliers (applied on top of base atr_multiplier)
+  # Wider SL in volatile sessions, tighter in quiet ones
+  session_atr_multiplier_map:
+    London: 1.2
+    London/NY Overlap: 1.2
+    New York: 1.0
+    Late NY / Asia: 0.8
+    Off-Hours: 1.0
+
   # Per-symbol strategy overrides
   # require_trend_alignment: both LowTF and HighTF must agree on direction
   # This prevents shorting a D1 bull trend on the SCALP/DAY pairs
   symbol_overrides:
     XAUUSD:
       require_trend_alignment: true
+      allow_entry_trend_only: true    # Follow entry TF when higher TF disagrees (D1 macro gate still blocks counter-trend)
+      rsi_confirmation: true          # Filter overbought buys / oversold sells
 
 # ── Runtime & Health ───────────────────────────────────────────────────────────
 runtime:

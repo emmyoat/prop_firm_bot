@@ -99,6 +99,12 @@ strategy:
   smc_filter_enabled: true
   smc_min_confluence_score: 20
 
+  # ADX Range Filter — blocks signals when market is consolidating/ranging
+  # ADX < adx_min_threshold means the market has no directional momentum -> skip signal
+  adx_filter_enabled: true
+  adx_min_threshold: 20     # 0-100 scale: <25 = ranging/weak, >25 = trending
+  adx_period: 14
+
   # Active timeframe pairs to scan
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }

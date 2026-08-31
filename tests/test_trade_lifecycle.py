@@ -322,3 +322,62 @@ def test_pending_order_trigger_then_tp(memory_store):
     assert kwargs["exit_price"] == 4690.0
     assert kwargs["pnl_pips"] == pytest.approx(200.0)
     assert len(memory_store.get_active_trades()) == 0
+
+
+def test_pending_sell_stop_trigger_no_false_sl(memory_store):
+    """
+    Ensure a pending SELL stop order triggered on a candle where the high reached
+    the SL level BEFORE breakdown does not falsely exit as SL_HIT on the trigger candle.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_1006",
+        "symbol": "XAUUSD",
+        "label": "SCALP",
+        "direction": "SELL",
+        "entry": 4437.0,
+        "sl": 4455.0,
+        "tp": 4380.0,
+        "initial_sl": 4455.0,
+        "current_sl": 4455.0,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4437.0,
+        "lowest_price": 4437.0,
+        "lot_size": 0.01,
+        "created_at": "2026-08-31T09:15:00+00:00",
+        "updated_at": "2026-08-31T09:15:00+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Candle reaches high 4456.0 (before breakdown), then dumps to low 4435.0 (triggering entry 4437.0) and closes at 4438.0
+    df_data = [
+        {"time": pd.to_datetime("2026-08-31 09:15:00"), "open": 4450.0, "high": 4456.0, "low": 4435.0, "close": 4438.0, "volume": 100},
+    ]
+    df = pd.DataFrame(df_data)
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": False,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # Trade should be TRIGGERED, but NOT closed as SL_HIT
+    mock_notifier.send_trade_closed_alert.assert_not_called()
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 1
+

@@ -41,7 +41,7 @@ def acquire_single_instance_lock(port: int = 49281):
 
 # ── Tick-value estimates for lot sizing without MT5 ───────────────────────────
 TICK_VALUE_MAP = {
-    "XAUUSD": 100.0,
+    "XAUUSD": 1.0,
     "GBPUSD": 10.0,
     "EURUSD": 10.0,
     "USDJPY": 9.1,
@@ -228,6 +228,9 @@ def main():
                 time.sleep(900)
                 continue
 
+            # ── Session check ─────────────────────────────────────────────────
+            session_name = get_active_session(config)
+
             # ── Active Trade Lifecycle Tracker (Breakeven & Trailing Alerts) ──
             try:
                 _evaluate_active_trades(state_store, data_loader, notifier, config, risk_manager, journal, session_name, logger)
@@ -235,7 +238,6 @@ def main():
                 logger.error(f"Error evaluating active trades: {trade_err}")
 
             # ── Session filter ────────────────────────────────────────────────
-            session_name = get_active_session(config)
             if not in_active_session(config):
                 logger.debug(f"Outside active sessions ({session_name}). Waiting...")
                 time.sleep(30)
@@ -653,9 +655,11 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             if is_buy:
                 tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
                 
-                # If SL was newly tightened on THIS bar or entry just triggered,
-                # guard against the pre-breakout candle low falsely hitting the new SL
-                if just_breakeven or just_trailed or just_triggered:
+                # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
+                # falsely hitting the initial SL. Only candle close beyond SL counts on trigger bar.
+                if just_triggered:
+                    sl_hit = bar_close <= trade["current_sl"]
+                elif just_breakeven or just_trailed:
                     sl_hit = (bar_close <= trade["current_sl"]) or (bar_low <= float(trade.get("initial_sl", trade["sl"])))
                 else:
                     sl_hit = (bar_low <= trade["current_sl"] or bar_close <= trade["current_sl"])
@@ -681,7 +685,11 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             else:
                 tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
                 
-                if just_breakeven or just_trailed or just_triggered:
+                # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
+                # falsely hitting the initial SL. Only candle close beyond SL counts on trigger bar.
+                if just_triggered:
+                    sl_hit = bar_close >= trade["current_sl"]
+                elif just_breakeven or just_trailed:
                     sl_hit = (bar_close >= trade["current_sl"]) or (bar_high >= float(trade.get("initial_sl", trade["sl"])))
                 else:
                     sl_hit = (bar_high >= trade["current_sl"] or bar_close >= trade["current_sl"])

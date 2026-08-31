@@ -96,7 +96,18 @@ class LiquidityWickStrategy(Strategy):
         if current_trend == SignalType.NEUTRAL:
              return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Structure Neutral")
 
-        # 2. RSI Confirmation Filter (optional per-symbol)
+        # 2. ADX Range Filter — block signals in consolidating/ranging markets
+        adx_enabled = self.config['strategy'].get('adx_filter_enabled', False)
+        if adx_enabled and len(df_entry) >= 28:
+            adx_period = self.config['strategy'].get('adx_period', 14)
+            adx_threshold = self.config['strategy'].get('adx_min_threshold', 20)
+            adx = self._calculate_adx(df_entry, adx_period)
+            logger.debug(f"DEBUG: {symbol} [{label}] ADX={adx:.1f} (threshold={adx_threshold})")
+            if adx < adx_threshold:
+                logger.info(f"DEBUG: {symbol} [{label}] ADX too low ({adx:.1f} < {adx_threshold}) — ranging market, skipping signal")
+                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"ADX too low ({adx:.1f} < {adx_threshold}) — ranging")
+
+        # 3. RSI Confirmation Filter (optional per-symbol)
         if self.rsi_confirmation and len(df_entry) > 20:
             rsi = self._calculate_rsi(df_entry['close'], self.config['strategy'].get('rsi_period', 14))
             
@@ -109,7 +120,7 @@ class LiquidityWickStrategy(Strategy):
             elif current_trend == SignalType.SELL and rsi < sell_limit:
                 return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too low for sell ({rsi:.0f} < {sell_limit})")
 
-        # 3. Identify Liquidity (Recent Swing Points on Entry TF)
+        # 4. Identify Liquidity (Recent Swing Points on Entry TF)
         liquidity_level = self._find_recent_liquidity(df_entry, current_trend)
         
         if liquidity_level is None:
@@ -118,7 +129,7 @@ class LiquidityWickStrategy(Strategy):
         logger.info(f"DEBUG: {symbol} [{label}] Trend is {current_trend} (Major={trend_major}, Entry={trend_entry}). Checking for {current_trend} setups...")
         # logger.debug(f"DEBUG: {symbol} Trend {current_trend}. Liquidity Level: {liquidity_level}")
 
-        # 3. Check for Sweep (Wick)
+        # 5. Check for Sweep (Wick)
         last_candle = df_entry.iloc[-1]
         
         signal_type = SignalType.NEUTRAL
@@ -406,3 +417,53 @@ class LiquidityWickStrategy(Strategy):
         
         atr = tr.rolling(window=period).mean().iloc[-1]
         return atr if not pd.isna(atr) else 0.0
+
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
+        """
+        Calculates the Average Directional Index (ADX).
+        ADX < 20  → ranging / consolidating market
+        ADX >= 20 → trending market (trade allowed)
+        Requires at least 2 * period + 1 rows for a meaningful result.
+        """
+        min_bars = 2 * period + 1
+        if len(df) < min_bars:
+            return 0.0
+
+        high = df['high'].values
+        low  = df['low'].values
+        close = df['close'].values
+
+        # Directional Movement
+        up_move   = np.diff(high)
+        down_move = -np.diff(low)
+
+        plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move,  0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        # True Range
+        prev_close = close[:-1]
+        h = high[1:]
+        l = low[1:]
+        tr = np.maximum(h - l, np.maximum(np.abs(h - prev_close), np.abs(l - prev_close)))
+
+        # Wilder smoothing (equivalent to EWM with alpha=1/period)
+        def wilder_smooth(arr, n):
+            result = np.zeros(len(arr))
+            result[n - 1] = arr[:n].sum()
+            for i in range(n, len(arr)):
+                result[i] = result[i - 1] - (result[i - 1] / n) + arr[i]
+            return result
+
+        atr_s    = wilder_smooth(tr,       period)
+        plus_s   = wilder_smooth(plus_dm,  period)
+        minus_s  = wilder_smooth(minus_dm, period)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            plus_di  = np.where(atr_s > 0, 100 * plus_s  / atr_s, 0.0)
+            minus_di = np.where(atr_s > 0, 100 * minus_s / atr_s, 0.0)
+            dx_denom = plus_di + minus_di
+            dx       = np.where(dx_denom > 0, 100 * np.abs(plus_di - minus_di) / dx_denom, 0.0)
+
+        adx_s = wilder_smooth(dx, period)
+        adx   = adx_s[-1] / period  # Normalise from accumulated Wilder sum
+        return float(adx) if not np.isnan(adx) else 0.0

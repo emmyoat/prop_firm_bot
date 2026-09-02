@@ -595,8 +595,12 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     continue
 
             # Trade is actively open — update excursion tracking on current bar
-            trade["highest_price"] = max(float(trade.get("highest_price", trade["entry"])), bar_high)
-            trade["lowest_price"] = min(float(trade.get("lowest_price", trade["entry"])), bar_low)
+            if just_triggered:
+                trade["highest_price"] = max(float(trade["entry"]), bar_close)
+                trade["lowest_price"] = min(float(trade["entry"]), bar_close)
+            else:
+                trade["highest_price"] = max(float(trade.get("highest_price", trade["entry"])), bar_high)
+                trade["lowest_price"] = min(float(trade.get("lowest_price", trade["entry"])), bar_low)
 
             profit_dist = (trade["highest_price"] - trade["entry"]) if is_buy else (trade["entry"] - trade["lowest_price"])
             profit_pips = profit_dist / pip_unit
@@ -663,15 +667,16 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             exit_price = None
 
             if is_buy:
-                tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
-                
                 # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
-                # falsely hitting the initial SL. Only candle close beyond SL counts on trigger bar.
+                # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
                 if just_triggered:
+                    tp_hit = trade["tp"] > 0 and bar_close >= trade["tp"]
                     sl_hit = bar_close <= trade["current_sl"]
                 elif just_breakeven or just_trailed:
+                    tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
                     sl_hit = (bar_close <= trade["current_sl"]) or (bar_low <= float(trade.get("initial_sl", trade["sl"])))
                 else:
+                    tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
                     sl_hit = (bar_low <= trade["current_sl"] or bar_close <= trade["current_sl"])
 
                 if tp_hit and not sl_hit:
@@ -693,15 +698,16 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                         exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                         exit_price = trade["current_sl"]
             else:
-                tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
-                
                 # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
-                # falsely hitting the initial SL. Only candle close beyond SL counts on trigger bar.
+                # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
                 if just_triggered:
+                    tp_hit = trade["tp"] > 0 and bar_close <= trade["tp"]
                     sl_hit = bar_close >= trade["current_sl"]
                 elif just_breakeven or just_trailed:
+                    tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
                     sl_hit = (bar_close >= trade["current_sl"]) or (bar_high >= float(trade.get("initial_sl", trade["sl"])))
                 else:
+                    tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
                     sl_hit = (bar_high >= trade["current_sl"] or bar_close >= trade["current_sl"])
 
                 if tp_hit and not sl_hit:

@@ -439,3 +439,124 @@ def test_scalp_m5_fetches_correct_timeframe(memory_store):
     mock_loader.fetch_data.assert_called_once_with("XAUUSD", "M5", n_bars=100)
 
 
+def test_pending_sell_stop_trigger_no_false_tp_on_trigger_bar(memory_store):
+    """
+    Ensure a pending SELL stop order triggered on a candle where the low reached
+    the TP level BEFORE/during trigger does not falsely exit as TP_HIT on the trigger candle
+    if the candle close is above TP.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_1008",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "SELL",
+        "entry": 4385.42,
+        "sl": 4388.67,
+        "tp": 4375.68,
+        "initial_sl": 4388.67,
+        "current_sl": 4388.67,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4385.42,
+        "lowest_price": 4385.42,
+        "lot_size": 0.03,
+        "created_at": "2026-09-02T22:47:40+00:00",
+        "updated_at": "2026-09-02T22:47:40+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Bar 1 (Trigger bar): Opens at 4387.5, High 4388.0, Low 4374.0 (deep wick), Close 4386.0
+    # Entry (4385.42) triggers, but Close (4386.0) is above TP (4375.68). Should NOT exit as TP_HIT.
+    df_data = [
+        {"time": pd.to_datetime("2026-09-02 22:45:00"), "open": 4387.5, "high": 4388.0, "low": 4374.0, "close": 4386.0, "volume": 100},
+    ]
+    df = pd.DataFrame(df_data)
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": False,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # Trade should be TRIGGERED, but NOT closed as TP_HIT
+    mock_notifier.send_trade_closed_alert.assert_not_called()
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 1
+
+
+def test_pending_buy_stop_trigger_no_false_tp_on_trigger_bar(memory_store):
+    """
+    Ensure a pending BUY stop order triggered on a candle where the high reached
+    the TP level BEFORE/during trigger does not falsely exit as TP_HIT on the trigger candle
+    if the candle close is below TP.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_1009",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "BUY",
+        "entry": 4385.00,
+        "sl": 4380.00,
+        "tp": 4400.00,
+        "initial_sl": 4380.00,
+        "current_sl": 4380.00,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4385.00,
+        "lowest_price": 4385.00,
+        "lot_size": 0.03,
+        "created_at": "2026-09-02T22:47:40+00:00",
+        "updated_at": "2026-09-02T22:47:40+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Bar 1 (Trigger bar): Opens at 4382.0, Low 4381.0, High 4405.0 (deep wick), Close 4386.0
+    # Entry (4385.0) triggers, but Close (4386.0) is below TP (4400.0). Should NOT exit as TP_HIT.
+    df_data = [
+        {"time": pd.to_datetime("2026-09-02 22:45:00"), "open": 4382.0, "high": 4405.0, "low": 4381.0, "close": 4386.0, "volume": 100},
+    ]
+    df = pd.DataFrame(df_data)
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": False,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # Trade should be TRIGGERED, but NOT closed as TP_HIT
+    mock_notifier.send_trade_closed_alert.assert_not_called()
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 1
+
+
+

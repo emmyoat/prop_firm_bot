@@ -517,6 +517,16 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
 
     tf_seconds_map = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
 
+    # Map label to its execution/entry timeframe (low TF) from config or standard defaults
+    configured_pairs = config.get("strategy", {}).get("active_pairs", []) if config else []
+    label_tf_map = {p.get("label"): p.get("low") for p in configured_pairs if isinstance(p, dict) and p.get("label") and p.get("low")}
+    default_tf_map = {
+        "SCALP_M5": "M5",
+        "SCALP": "M15",
+        "DAY": "H1",
+        "SWING": "H4",
+    }
+
     for trade in trades:
         symbol = trade["symbol"]
         label = trade["label"]
@@ -524,8 +534,8 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
         pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
         is_buy = trade["direction"] == "BUY"
 
-        # Timeframe for tracking
-        tf = "M15" if label == "SCALP" else ("H1" if label == "DAY" else "H4")
+        # Timeframe for tracking: match the entry timeframe of the signal
+        tf = label_tf_map.get(label) or default_tf_map.get(label, "M15")
         df = data_loader.fetch_data(symbol, tf, n_bars=100)
         if df is None or df.empty:
             continue

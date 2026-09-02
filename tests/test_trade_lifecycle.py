@@ -381,3 +381,61 @@ def test_pending_sell_stop_trigger_no_false_sl(memory_store):
     assert len(active) == 1
     assert active[0]["triggered"] == 1
 
+
+def test_scalp_m5_fetches_correct_timeframe(memory_store):
+    """
+    Ensure SCALP_M5 and other active pair labels fetch their exact entry TF (e.g. M5 for SCALP_M5).
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_1007",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "SELL",
+        "entry": 4307.95,
+        "sl": 4314.87,
+        "tp": 4287.19,
+        "initial_sl": 4314.87,
+        "current_sl": 4314.87,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4307.95,
+        "lowest_price": 4307.95,
+        "lot_size": 0.01,
+        "created_at": "2026-09-02T11:12:05+00:00",
+        "updated_at": "2026-09-02T11:12:05+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    df_data = [
+        {"time": pd.to_datetime("2026-09-02 11:10:00"), "open": 4309.0, "high": 4310.0, "low": 4308.5, "close": 4309.2, "volume": 100},
+    ]
+    df = pd.DataFrame(df_data)
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = False
+
+    config = {
+        "risk": {
+            "breakeven_enabled": True,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        },
+        "strategy": {
+            "active_pairs": [
+                {"low": "M5", "high": "M15", "label": "SCALP_M5"},
+                {"low": "M15", "high": "H1", "label": "SCALP"},
+            ]
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # Verify fetch_data was called with M5 (not H4 or M15)
+    mock_loader.fetch_data.assert_called_once_with("XAUUSD", "M5", n_bars=100)
+
+

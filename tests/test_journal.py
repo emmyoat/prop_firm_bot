@@ -37,20 +37,12 @@ def test_journal():
     journal.log_trade(mock_exit, mock_entry)
     
     # Verify file exists and has content
-    if os.path.exists(test_file):
-        with open(test_file, 'r') as f:
-            lines = f.readlines()
-            print(f"File created with {len(lines)} lines.")
-            if len(lines) == 2:
-                print("SUCCESS: Header and Trade entry found.")
-                print(f"Last Line: {lines[-1].strip()}")
-                return True
-            else:
-                print("FAILURE: Unexpected line count.")
-    else:
-        print("FAILURE: CSV File not created.")
-    
-    return False
+    assert os.path.exists(test_file), "CSV File not created."
+    with open(test_file, 'r') as f:
+        lines = f.readlines()
+        print(f"File created with {len(lines)} lines.")
+        assert len(lines) == 2, f"Unexpected line count: {len(lines)}"
+        print(f"Last Line: {lines[-1].strip()}")
 
 if __name__ == "__main__":
     if test_journal():

@@ -60,8 +60,11 @@ class TelegramNotifier:
         sleeper: Callable[[float], None] = time.sleep,
         random_source: Callable[[], float] = random.random,
     ):
-        self.token = token
-        self.chat_id = str(chat_id or "")
+        token_clean = str(token or "").strip().strip('"').strip("'")
+        if token_clean.startswith("bot"):
+            token_clean = token_clean[3:]
+        self.token = token_clean
+        self.chat_id = str(chat_id or "").strip().strip('"').strip("'")
         self.enabled = enabled
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.session = session or requests.Session()
@@ -306,7 +309,15 @@ class TelegramNotifier:
                     and (response.status_code == 429 or response.status_code >= 500)
                 )
                 if not retryable or attempt >= self.max_attempts:
-                    self._record_failure(str(exc))
+                    err_msg = str(exc)
+                    if response is not None:
+                        try:
+                            resp_json = response.json()
+                            if "description" in resp_json:
+                                err_msg = f"{exc} - {resp_json['description']}"
+                        except Exception:
+                            pass
+                    self._record_failure(err_msg)
                     return None
                 self.metrics["retries"] += 1
                 retry_after = response.headers.get("Retry-After") if response is not None else None

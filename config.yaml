@@ -32,6 +32,7 @@ data_source:
     H4: 3600                # 1 hour (4-hour candle changes 6 times/day)
     H1: 600                 # 10 minutes (6 calls/hr)
     M15: 180                # 3 minutes (fast real-time scalp updates)
+    M5: 120                 # 2 minutes (keeps M5 fresh while staying within free tier)
   max_stale_seconds: 600    # Fail closed after 10 minutes of stale market data
   min_request_gap_seconds: 8
   requests_per_minute: 8

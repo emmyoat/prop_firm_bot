@@ -108,7 +108,7 @@ strategy:
 
   # Active timeframe pairs to scan
   active_pairs:
-    - { low: "M5", high: "M15", label: "SCALP_M5" }
+    - { low: "M5", high: "H1", label: "SCALP_M5" }
     - { low: "H4", high: "D1", label: "SWING" }
     - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }

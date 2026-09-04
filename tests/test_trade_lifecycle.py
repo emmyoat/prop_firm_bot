@@ -559,4 +559,152 @@ def test_pending_buy_stop_trigger_no_false_tp_on_trigger_bar(memory_store):
     assert active[0]["triggered"] == 1
 
 
+def test_multiscan_trigger_bar_no_false_breakeven_alert(memory_store):
+    """
+    Ensure that a trade triggered during a candle with a large pre-breakout wick
+    does NOT trigger a false breakeven alert or exit on scan 1 OR on subsequent scan 2
+    while still on the exact same candle.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_2001",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "SELL",
+        "entry": 4385.42,
+        "sl": 4388.67,
+        "tp": 4370.00,
+        "initial_sl": 4388.67,
+        "current_sl": 4388.67,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "trigger_bar_time": "",
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4385.42,
+        "lowest_price": 4385.42,
+        "lot_size": 0.03,
+        "created_at": "2026-09-02T22:47:40+00:00",
+        "updated_at": "2026-09-02T22:47:40+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Bar 1 (Trigger bar 22:45:00): Low is 4374.0 (114 pips below entry, but formed before breakout).
+    # Close is 4386.0 (live price near entry).
+    df_trigger = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 22:45:00"), "open": 4387.5, "high": 4388.0, "low": 4374.0, "close": 4386.0, "volume": 100},
+    ])
+
+    mock_loader = MagicMock()
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": True,
+            "breakeven_activation_pips": 100,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        }
+    }
+
+    # Scan 1: Trade triggers
+    mock_loader.fetch_data.return_value = df_trigger
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    assert mock_notifier.send_breakeven_alert.call_count == 0
+    assert mock_notifier.send_trade_closed_alert.call_count == 0
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 1
+    assert active[0]["trigger_bar_time"] != ""
+
+    # Scan 2 (1 minute later, still on the 22:45:00 candle):
+    # Must NOT send false Breakeven or exit
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    assert mock_notifier.send_breakeven_alert.call_count == 0
+    assert mock_notifier.send_trade_closed_alert.call_count == 0
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+
+    # Scan 3 (Next candle 22:50:00 arrives and genuinely moves down to 4373.0, >100 pips):
+    df_subsequent = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 22:45:00"), "open": 4387.5, "high": 4388.0, "low": 4374.0, "close": 4386.0, "volume": 100},
+        {"time": pd.to_datetime("2026-09-02 22:50:00"), "open": 4386.0, "high": 4386.5, "low": 4373.0, "close": 4374.0, "volume": 100},
+    ])
+    mock_loader.fetch_data.return_value = df_subsequent
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # Now breakeven alert MUST legitimately trigger
+    assert mock_notifier.send_breakeven_alert.call_count == 1
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["be_alerted"] == 1
+    assert active[0]["current_sl"] == pytest.approx(4385.42)
+
+
+def test_pending_order_pre_trigger_candles_ignored_after_trigger(memory_store):
+    """
+    Ensure candles prior to the trigger bar are skipped and cannot falsely impact
+    excursions or trigger SL/TP once the trade is triggered.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_2002",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "BUY",
+        "entry": 4390.00,
+        "sl": 4380.00,
+        "tp": 4410.00,
+        "initial_sl": 4380.00,
+        "current_sl": 4380.00,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "trigger_bar_time": "",
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4390.00,
+        "lowest_price": 4390.00,
+        "lot_size": 0.03,
+        "created_at": "2026-09-02T22:40:00+00:00",
+        "updated_at": "2026-09-02T22:40:00+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Bar 1 (22:40:00): Low dropped to 4375.0 (below SL 4380), High 4388.0 (below entry 4390). Not triggered!
+    # Bar 2 (22:45:00): High reaches 4392.0 (triggers entry 4390). Close 4391.0.
+    df = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 22:40:00"), "open": 4385.0, "high": 4388.0, "low": 4375.0, "close": 4386.0, "volume": 100},
+        {"time": pd.to_datetime("2026-09-02 22:45:00"), "open": 4386.0, "high": 4392.0, "low": 4388.0, "close": 4391.0, "volume": 100},
+    ])
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": False,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        }
+    }
+
+    # Scan 1: Bar 1 skipped, Bar 2 triggers
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 1
+
+    # Scan 2: Re-evaluating df containing Bar 1 (pre-trigger) must NOT exit on Bar 1's low 4375.0
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    mock_notifier.send_trade_closed_alert.assert_not_called()
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+
+
+
 

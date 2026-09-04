@@ -398,6 +398,7 @@ def main():
                             "current_sl": signal.sl_price,
                             "is_stop_order": signal.is_stop_order,
                             "triggered": 0 if signal.is_stop_order else 1,
+                            "trigger_bar_time": "" if signal.is_stop_order else candle_time_str,
                             "be_alerted": 0,
                             "last_trail_sl": 0.0,
                             "highest_price": signal.price,
@@ -566,16 +567,26 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             bar_low = float(bar["low"])
             bar_close = float(bar["close"])
 
-            # ── Check Pending Order Trigger ──
-            just_triggered = False
+            try:
+                bar_dt = pd.to_datetime(bar_time)
+                if bar_dt.tzinfo is None:
+                    bar_dt = bar_dt.tz_localize(timezone.utc)
+                else:
+                    bar_dt = bar_dt.tz_convert(timezone.utc)
+                bar_ts = bar_dt.timestamp()
+                bar_time_str = bar_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                bar_dt = created_dt
+                bar_ts = created_ts
+                bar_time_str = str(bar_time)
+
+            # ── Check Pending Order Trigger & Trigger Bar Resolution ──
+            is_trigger_bar = False
+            trigger_bar_time = trade.get("trigger_bar_time", "")
+
             if trade.get("is_stop_order") and not trade.get("triggered"):
                 # Expiry check
                 try:
-                    bar_dt = pd.to_datetime(bar_time)
-                    if bar_dt.tzinfo is None:
-                        bar_dt = bar_dt.tz_localize(timezone.utc)
-                    else:
-                        bar_dt = bar_dt.tz_convert(timezone.utc)
                     if (bar_dt - created_dt).total_seconds() > pending_expiry_hours * 3600:
                         state_store.remove_active_trade(trade_id)
                         logger.info(f"Pending order expired: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
@@ -587,17 +598,46 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                 triggered = (is_buy and bar_high >= trade["entry"]) or (not is_buy and bar_low <= trade["entry"])
                 if triggered:
                     trade["triggered"] = 1
-                    trade["highest_price"] = trade["entry"]
-                    trade["lowest_price"] = trade["entry"]
-                    just_triggered = True
+                    trade["trigger_bar_time"] = bar_time_str
+                    trigger_bar_time = bar_time_str
+                    trade["highest_price"] = max(float(trade["entry"]), bar_close)
+                    trade["lowest_price"] = min(float(trade["entry"]), bar_close)
+                    is_trigger_bar = True
                     logger.info(f"Pending order triggered: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
                 else:
                     continue
+            else:
+                # Trade is actively open — resolve trigger bar relationship
+                if trigger_bar_time:
+                    try:
+                        trig_dt = pd.to_datetime(trigger_bar_time)
+                        if trig_dt.tzinfo is None:
+                            trig_dt = trig_dt.tz_localize(timezone.utc)
+                        else:
+                            trig_dt = trig_dt.tz_convert(timezone.utc)
+                        trig_ts = trig_dt.timestamp()
+                        if bar_ts < trig_ts:
+                            # Pre-trigger historical bar — skip
+                            continue
+                        is_trigger_bar = (bar_ts == trig_ts)
+                    except Exception:
+                        is_trigger_bar = (bar_time_str == trigger_bar_time)
+                else:
+                    # Legacy or market order without trigger_bar_time
+                    if bar_ts + tf_sec <= created_ts:
+                        continue
+                    elif bar_ts <= created_ts < bar_ts + tf_sec:
+                        trade["trigger_bar_time"] = bar_time_str
+                        is_trigger_bar = True
+                    else:
+                        is_trigger_bar = False
 
             # Trade is actively open — update excursion tracking on current bar
-            if just_triggered:
-                trade["highest_price"] = max(float(trade["entry"]), bar_close)
-                trade["lowest_price"] = min(float(trade["entry"]), bar_close)
+            if is_trigger_bar:
+                # Guard against pre-breakout extremes on the trigger candle.
+                # Only live closing prices achieved during/after trigger count.
+                trade["highest_price"] = max(float(trade.get("highest_price", trade["entry"])), bar_close)
+                trade["lowest_price"] = min(float(trade.get("lowest_price", trade["entry"])), bar_close)
             else:
                 trade["highest_price"] = max(float(trade.get("highest_price", trade["entry"])), bar_high)
                 trade["lowest_price"] = min(float(trade.get("lowest_price", trade["entry"])), bar_low)
@@ -667,9 +707,9 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             exit_price = None
 
             if is_buy:
-                # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
+                # If evaluating on the trigger bar, guard against pre-breakout candle extremes
                 # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
-                if just_triggered:
+                if is_trigger_bar:
                     tp_hit = trade["tp"] > 0 and bar_close >= trade["tp"]
                     sl_hit = bar_close <= trade["current_sl"]
                 elif just_breakeven or just_trailed:
@@ -698,9 +738,9 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                         exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                         exit_price = trade["current_sl"]
             else:
-                # If entry just triggered on THIS bar, guard against pre-breakout candle extremes
+                # If evaluating on the trigger bar, guard against pre-breakout candle extremes
                 # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
-                if just_triggered:
+                if is_trigger_bar:
                     tp_hit = trade["tp"] > 0 and bar_close <= trade["tp"]
                     sl_hit = bar_close >= trade["current_sl"]
                 elif just_breakeven or just_trailed:

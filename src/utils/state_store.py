@@ -120,6 +120,7 @@ class StateStore:
                     current_sl REAL NOT NULL,
                     is_stop_order INTEGER NOT NULL DEFAULT 1,
                     triggered INTEGER NOT NULL DEFAULT 0,
+                    trigger_bar_time TEXT NOT NULL DEFAULT '',
                     be_alerted INTEGER NOT NULL DEFAULT 0,
                     last_trail_sl REAL NOT NULL DEFAULT 0,
                     highest_price REAL NOT NULL,
@@ -130,6 +131,10 @@ class StateStore:
                 );
                 """
             )
+            try:
+                db.execute("ALTER TABLE active_trades ADD COLUMN trigger_bar_time TEXT NOT NULL DEFAULT ''")
+            except Exception:
+                pass
             db.execute(
                 "INSERT OR IGNORE INTO metadata(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -352,15 +357,16 @@ class StateStore:
                 INSERT INTO active_trades(
                     trade_id, symbol, label, direction, entry, sl, tp,
                     initial_sl, current_sl, is_stop_order, triggered,
-                    be_alerted, last_trail_sl, highest_price, lowest_price,
-                    lot_size, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    trigger_bar_time, be_alerted, last_trail_sl, highest_price,
+                    lowest_price, lot_size, created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(trade_id) DO UPDATE SET
                     entry=excluded.entry,
                     sl=excluded.sl,
                     tp=excluded.tp,
                     current_sl=excluded.current_sl,
                     triggered=excluded.triggered,
+                    trigger_bar_time=excluded.trigger_bar_time,
                     be_alerted=excluded.be_alerted,
                     last_trail_sl=excluded.last_trail_sl,
                     highest_price=excluded.highest_price,
@@ -380,6 +386,7 @@ class StateStore:
                     float(trade.get("current_sl", trade["sl"])),
                     1 if trade.get("is_stop_order", True) else 0,
                     1 if trade.get("triggered", False) else 0,
+                    str(trade.get("trigger_bar_time", "") or ""),
                     1 if trade.get("be_alerted", False) else 0,
                     float(trade.get("last_trail_sl", 0.0)),
                     float(trade.get("highest_price", trade["entry"])),

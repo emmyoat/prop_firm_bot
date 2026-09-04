@@ -92,6 +92,21 @@ strategy:
   sl_buffer_map:
     XAUUSD: 0.50
     default: 0.50
+  # Stop Loss calculation mode:
+  # "atr" = distance from entry based on ATR (avoids giant candle-sized stops on DAY/SWING)
+  # "candle_extreme" = opposite side of signal candle + buffer (legacy)
+  sl_mode: "atr"
+  sl_atr_multiplier: 1.5
+  sl_atr_multiplier_map:
+    DAY: 1.5
+    SCALP: 1.5
+    SCALP_M5: 1.5
+    SWING: 1.5
+  max_sl_pips_map:
+    DAY: 200            # Cap DAY SL at 200 pips ($20.00 on Gold)
+    SCALP: 150          # Cap SCALP SL at 150 pips ($15.00 on Gold)
+    SCALP_M5: 80        # Cap SCALP_M5 SL at 80 pips ($8.00 on Gold)
+    SWING: 350          # Cap SWING SL at 350 pips ($35.00 on Gold)
   tp_mode: "dynamic"        # Options: "structured", "dynamic", "fixed_rr"
   risk_reward_ratio: 3.0
   news_blocked_times: []

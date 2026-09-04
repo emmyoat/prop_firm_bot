@@ -225,26 +225,6 @@ class LiquidityWickStrategy(Strategy):
             last_candle = df_entry.iloc[-1]
             
             # --- VOLATILITY-BASED RISK (ATR) ---
-            atr_multiplier = self.config['strategy'].get('atr_multiplier', 1.5)
-            # Check for generic multiplier map
-            multiplier_map = self.config['strategy'].get('atr_multiplier_map', {})
-            atr_multiplier = multiplier_map.get(symbol, atr_multiplier)
-            
-            # Force/Ensure XAUUSD is low (0.5) if not caught by map for some reason
-            if "XAU" in symbol and atr_multiplier > 0.5:
-                 atr_multiplier = 0.5
-                 logger.info(f"DEBUG: {symbol} Forced ATR to 0.5 (Was {atr_multiplier})")
-
-            # ── Session-specific ATR adjustment ──────────────────────────
-            session_name = data.get("session_name", "")
-            session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
-            if session_name and session_name in session_atr_map:
-                session_factor = session_atr_map[session_name]
-                atr_multiplier *= session_factor
-                logger.info(f"DEBUG: {symbol} Session ATR: {session_name} factor={session_factor} → adjusted={atr_multiplier:.4f}")
-
-            logger.info(f"DEBUG: {symbol} ATR Multiplier Lookup: Pct={atr_multiplier} (Map={multiplier_map})")
-
             entry_multiplier = self.config['strategy'].get('entry_atr_multiplier', 0.1)
             atr_period = self.config['strategy'].get('atr_period', 14)
             atr_value = self._calculate_atr(df_entry, atr_period)
@@ -252,23 +232,68 @@ class LiquidityWickStrategy(Strategy):
             # SL Buffer (Safety)
             sl_buffers = self.config['strategy'].get('sl_buffer_map', {})
             fallback_buffer = sl_buffers.get(symbol, sl_buffers.get('default', 0.50))
-            
-            sl_buffer_price = atr_value * atr_multiplier if (atr_value and not pd.isna(atr_value)) else fallback_buffer
-            sl_buffer_price = max(sl_buffer_price, fallback_buffer)
+            valid_atr = atr_value if (atr_value and not pd.isna(atr_value)) else fallback_buffer
 
             # Entry Buffer (Tighter confirmations)
-            entry_buffer_price = atr_value * entry_multiplier if (atr_value and not pd.isna(atr_value)) else (fallback_buffer * 0.2)
-            
-            logger.info(f"DEBUG: {symbol} SL Buffer: {sl_buffer_price:.5f} | Entry Buffer: {entry_buffer_price:.5f} (ATR: {atr_value if not pd.isna(atr_value) else 'NaN'})")
-            
+            entry_buffer_price = valid_atr * entry_multiplier if (atr_value and not pd.isna(atr_value)) else (fallback_buffer * 0.2)
+
             if signal_type == SignalType.BUY:
-                 # Buy Stop at High of signal candle + Small Entry Buffer
-                 price = last_candle['high'] + entry_buffer_price
-                 stop_loss = last_candle['low'] - sl_buffer_price
+                # Buy Stop at High of signal candle + Small Entry Buffer
+                price = last_candle['high'] + entry_buffer_price
             else:
-                 # Sell Stop at Low of signal candle - Small Entry Buffer
-                 price = last_candle['low'] - entry_buffer_price
-                 stop_loss = last_candle['high'] + sl_buffer_price
+                # Sell Stop at Low of signal candle - Small Entry Buffer
+                price = last_candle['low'] - entry_buffer_price
+
+            # Stop Loss Calculation Mode: 'atr' (distance from entry) or 'candle_extreme' (opposite wick)
+            sl_mode = self.config['strategy'].get('sl_mode', 'atr')
+            if sl_mode == "atr":
+                sl_atr_mult_map = self.config['strategy'].get('sl_atr_multiplier_map', {})
+                sl_atr_mult = sl_atr_mult_map.get(label, self.config['strategy'].get('sl_atr_multiplier', 1.5))
+
+                session_name = data.get("session_name", "")
+                session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
+                if session_name and session_name in session_atr_map:
+                    session_factor = session_atr_map[session_name]
+                    sl_atr_mult *= session_factor
+
+                sl_dist = valid_atr * sl_atr_mult
+                sl_dist = max(sl_dist, fallback_buffer)
+
+                # Hard cap on SL distance in pips if configured
+                max_sl_map = self.config['strategy'].get('max_sl_pips_map', {})
+                max_pips = max_sl_map.get(label, self.config['strategy'].get('max_sl_pips', None))
+                if max_pips:
+                    pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
+                    sl_dist = min(sl_dist, max_pips * pip_unit)
+
+                if signal_type == SignalType.BUY:
+                    stop_loss = price - sl_dist
+                else:
+                    stop_loss = price + sl_dist
+
+                logger.info(f"DEBUG: {symbol} [{label}] SL Mode=ATR | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f} (ATR={valid_atr:.2f}, Mult={sl_atr_mult:.2f})")
+            else:
+                # Legacy: opposite side of signal candle + buffer
+                atr_multiplier = self.config['strategy'].get('atr_multiplier', 1.5)
+                multiplier_map = self.config['strategy'].get('atr_multiplier_map', {})
+                atr_multiplier = multiplier_map.get(symbol, atr_multiplier)
+                if "XAU" in symbol and atr_multiplier > 0.5:
+                    atr_multiplier = 0.5
+
+                session_name = data.get("session_name", "")
+                session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
+                if session_name and session_name in session_atr_map:
+                    atr_multiplier *= session_atr_map[session_name]
+
+                sl_buffer_price = valid_atr * atr_multiplier
+                sl_buffer_price = max(sl_buffer_price, fallback_buffer)
+
+                if signal_type == SignalType.BUY:
+                    stop_loss = last_candle['low'] - sl_buffer_price
+                else:
+                    stop_loss = last_candle['high'] + sl_buffer_price
+
+                logger.info(f"DEBUG: {symbol} [{label}] SL Mode=CandleExtreme | Price={price:.5f} | SL={stop_loss:.5f}")
             
             # 4. RSI Filter (Optimization for Higher Win Rate)
             rsi_period = self.config['strategy'].get('rsi_period', 14)

@@ -52,6 +52,8 @@ The database is created automatically and checked with SQLite integrity validati
 
 Daily counters roll over using UTC dates after a restart or downtime. Cumulative paper P&L and drawdown history remain persistent.
 
+Closed trades are logged to [`trades.csv`](trades.csv). When deployed to Render, set `TRADES_CSV_PATH=/data/trades.csv` (configured in [`render.yaml`](render.yaml)) so trade history is preserved on the persistent disk across redeployments.
+
 
 ## Testing and Verification
 

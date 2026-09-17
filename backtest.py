@@ -14,6 +14,12 @@ Strategies available:
 
 import argparse
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 import logging
 import time
 import os
@@ -30,6 +36,7 @@ from src.utils.config_loader import load_config, load_credentials
 from src.utils.logger import setup_logger
 from src.data.twelvedata_loader import TwelveDataLoader
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
+from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
 from src.models import SignalType
 
 logger = setup_logger(log_level="WARNING", log_file=None)
@@ -334,6 +341,13 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
     all_trades   = []
     pair_metrics = {}
 
+    # Ensure all cached DataFrames have a UTC DatetimeIndex
+    for df in data_cache.values():
+        if df is not None and not df.empty:
+            if "time" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
+                df.set_index("time", inplace=True, drop=False)
+            df.index = pd.to_datetime(df.index, utc=True)
+
     for symbol in symbols:
         pip_unit = 0.1 if "XAU" in symbol else 1.0
 
@@ -362,9 +376,9 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
             for df in [df_low, df_high]:
                 if "time" in df.columns and not isinstance(df.index, pd.DatetimeIndex):
                     df.set_index("time", inplace=True, drop=False)
-                df.index = pd.to_datetime(df.index)
+                df.index = pd.to_datetime(df.index, utc=True)
 
-            trading_start = pd.Timestamp.now() - pd.Timedelta(days=backtest_days)
+            trading_start = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=backtest_days)
 
             active_trades  = []
             pending_orders = []
@@ -381,9 +395,11 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                 curr_time = bar.name
                 if not isinstance(curr_time, pd.Timestamp):
                     try:
-                        curr_time = pd.to_datetime(curr_time)
+                        curr_time = pd.to_datetime(curr_time, utc=True)
                     except Exception:
                         continue
+                elif curr_time.tzinfo is None:
+                    curr_time = curr_time.tz_localize("UTC")
 
                 if curr_time < trading_start:
                     continue
@@ -472,6 +488,28 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                     signal   = strategy.generate_signal(data_map, symbol, label=label)
 
                     if signal.signal_type != SignalType.NEUTRAL:
+                        # SMC confluence filter
+                        if config.get("strategy", {}).get("smc_filter_enabled", False):
+                            smc_map = config["strategy"].get("smc_min_confluence_map", {})
+                            smc_min = smc_map.get(label, config["strategy"].get("smc_min_confluence_score", 20))
+                            if smc_min > 0:
+                                try:
+                                    df_slice = df_low.iloc[max(0, i - 100):i+1]
+                                    fvgs = detect_fvg_zones(df_slice)
+                                    obs = detect_order_blocks(df_slice)
+                                    score, _ = calculate_confluence_score(
+                                        current_price=float(bar["close"]),
+                                        signal_type=signal.signal_type.name,
+                                        order_blocks=obs,
+                                        fvg_zones=fvgs,
+                                        entry_price=signal.price,
+                                        stop_loss=signal.sl_price,
+                                    )
+                                    if score < smc_min:
+                                        continue
+                                except Exception:
+                                    pass
+
                         if signal.is_stop_order:
                             pending_orders.append({
                                 "type":        "BUY_STOP" if signal.signal_type == SignalType.BUY else "SELL_STOP",
@@ -502,9 +540,10 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
 # Data fetching
 # ══════════════════════════════════════════════════════════════════════════════
 
-def fetch_all_data(loader: TwelveDataLoader, symbols: list, pairs: list, n_bars: int = 5000) -> dict:
+def fetch_all_data(loader: TwelveDataLoader, symbols: list, pairs: list, n_bars: int = 5000, cache_dir: str = ".cache/data") -> dict:
     """
     Pre-fetches all required symbol+timeframe combinations once,
+    caching to disk so repeated runs save TwelveData API quota.
     returns a keyed dict: {f"{symbol}_{tf}": DataFrame}
     """
     needed: set[tuple] = set()
@@ -512,21 +551,42 @@ def fetch_all_data(loader: TwelveDataLoader, symbols: list, pairs: list, n_bars:
         for pair in pairs:
             needed.add((sym, pair["low"]))
             needed.add((sym, pair["high"]))
+        needed.add((sym, "D1"))
 
+    os.makedirs(cache_dir, exist_ok=True)
     cache = {}
     total = len(needed)
-    print(f"\nFetching {total} symbol/timeframe combinations from TwelveData...")
+    print(f"\nFetching {total} symbol/timeframe combinations (cache: {cache_dir})...")
 
     for idx, (sym, tf) in enumerate(sorted(needed), 1):
         key = f"{sym}_{tf}"
+        csv_path = os.path.join(cache_dir, f"{key}.csv")
+        if os.path.exists(csv_path):
+            try:
+                cached_df = pd.read_csv(csv_path)
+                cached_df["time"] = pd.to_datetime(cached_df["time"], utc=True)
+                for col in ("open", "high", "low", "close", "volume"):
+                    if col in cached_df.columns:
+                        cached_df[col] = pd.to_numeric(cached_df[col], errors="coerce")
+                cached_df = cached_df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+                if len(cached_df) >= 200:
+                    cache[key] = cached_df
+                    print(f"  [{idx}/{total}] {sym} {tf}... [cache hit] {len(cached_df)} bars")
+                    continue
+            except Exception:
+                pass
+
         print(f"  [{idx}/{total}] {sym} {tf}...", end="", flush=True)
         df = loader.fetch_data(sym, tf, n_bars=n_bars)
         if df is not None and not df.empty:
             cache[key] = df
+            try:
+                df.to_csv(csv_path, index=False)
+            except Exception:
+                pass
             print(f" {len(df)} bars")
         else:
             print(" FAILED — will skip pairs using this data")
-        # Respect rate limits between fetches
         time.sleep(0.5)
 
     return cache

@@ -176,7 +176,12 @@ def main():
 
     # ── News & journal ────────────────────────────────────────────────────────
     stats_reporter = StatsReporter(config["system"]["magic_number"])
-    journal = TradeJournal("trades.csv")
+    trades_csv_path = (
+        os.environ.get("TRADES_CSV_PATH")
+        or runtime_cfg.get("trades_csv_path", "trades.csv")
+    )
+    journal = TradeJournal(trades_csv_path)
+    logger.info(f"Trade journal: {trades_csv_path}")
     last_report_time = time.time()
 
     symbols      = config["system"]["symbol_list"]
@@ -320,25 +325,27 @@ def main():
 
                         # D. SMC confluence filter
                         if config["strategy"].get("smc_filter_enabled", False):
-                            smc_min = config["strategy"].get("smc_min_confluence_score", 20)
-                            try:
-                                fvgs  = detect_fvg_zones(df_low)
-                                obs   = detect_order_blocks(df_low)
-                                score, _ = calculate_confluence_score(
-                                    current_price=float(df_low.iloc[-1]["close"]),
-                                    signal_type=signal.signal_type.name,
-                                    order_blocks=obs,
-                                    fvg_zones=fvgs,
-                                    entry_price=signal.price,
-                                    stop_loss=signal.sl_price,
-                                )
-                                if score < smc_min:
-                                    state_store.release_signal(dedup_key, candle_time_str)
-                                    logger.debug(f"SMC Filter: {symbol} skipped — score {score} < {smc_min}")
-                                    continue
-                                signal.comment = f"{signal.comment} [SMC:{score}]"
-                            except Exception as smc_err:
-                                logger.warning(f"SMC filter error: {smc_err}")
+                            smc_map = config["strategy"].get("smc_min_confluence_map", {})
+                            smc_min = smc_map.get(label, config["strategy"].get("smc_min_confluence_score", 20))
+                            if smc_min > 0:
+                                try:
+                                    fvgs  = detect_fvg_zones(df_low)
+                                    obs   = detect_order_blocks(df_low)
+                                    score, _ = calculate_confluence_score(
+                                        current_price=float(df_low.iloc[-1]["close"]),
+                                        signal_type=signal.signal_type.name,
+                                        order_blocks=obs,
+                                        fvg_zones=fvgs,
+                                        entry_price=signal.price,
+                                        stop_loss=signal.sl_price,
+                                    )
+                                    if score < smc_min:
+                                        state_store.release_signal(dedup_key, candle_time_str)
+                                        logger.debug(f"SMC Filter: {symbol} [{label}] skipped — score {score} < {smc_min}")
+                                        continue
+                                    signal.comment = f"{signal.comment} [SMC:{score}]"
+                                except Exception as smc_err:
+                                    logger.warning(f"SMC filter error: {smc_err}")
 
                         # E. Risk check
                         allowed_signal, block_reason = risk_manager.check_signal_allowed(symbol)
@@ -550,12 +557,15 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             created_dt = now_utc
             created_ts = now_utc.timestamp()
 
-        # Filter candles from trade inception onwards, ordered chronologically
+        # Filter candles from trade inception onwards, ordered chronologically.
+        # A candle with open time T ends at T + tf_sec. If T + tf_sec <= created_ts,
+        # it closed before this trade existed and must be excluded.
         tf_sec = tf_seconds_map.get(tf.upper(), 900)
         df_dt = pd.to_datetime(df["time"], utc=True)
         df_timestamps = df_dt.map(lambda d: d.timestamp())
 
-        eval_bars = df[df_timestamps >= (created_ts - tf_sec)]
+        df_close_timestamps = df_timestamps + tf_sec
+        eval_bars = df[df_close_timestamps > created_ts]
         if eval_bars.empty:
             eval_bars = df.iloc[[-1]]
 

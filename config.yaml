@@ -20,7 +20,12 @@ system:
 # Used for risk calculations (lot size recommendations, drawdown tracking).
 # No real money is at risk — this is signal-only.
 virtual_account:
-  balance: 1000.0          # Simulated account balance in USD
+  # NOTE: Changing this value re-bases the persisted drawdown baseline and
+  # high-water-mark on next start. At $1,000, the 1% risk-per-trade budget
+  # cannot be expressed in 0.01-lot increments for wide DAY/SWING stops, so
+  # signals are emitted with Lot 0.0. Keep this aligned with the account the
+  # risk profile was tuned for.
+  balance: 10000.0         # Simulated account balance in USD
   currency: "USD"
 
 # ── TwelveData API ───────────────────────────────────────────────────────────
@@ -43,7 +48,7 @@ data_source:
     max_delay_seconds: 30
     jitter_seconds: 1
     connect_timeout_seconds: 5
-    read_timeout_seconds: 15
+    read_timeout_seconds: 45
   # TwelveData free tier: 800 calls/day, 8 req/min
   # Paid plans available at https://twelvedata.com/pricing
 
@@ -52,18 +57,16 @@ risk:
   account_equity_risk_pct: 1.0     # % of virtual balance risked per signal
   max_daily_loss_pct: 5.0          # Pause signalling if daily DD hits this
   max_overall_drawdown_pct: 10.0   # Pause signalling if overall DD hits this
-  profit_target_daily_pct: 5.0     # Stop signalling once daily target is hit
+  profit_target_daily_pct: 50.0    # Stop signalling once daily target is hit
   max_spread_points: 15
   spread_limit_map:
-    US30: 200
-    NAS100: 200
     XAUUSD: 30
   martingale_multiplier: 1.0       # 1.0 = No Martingale
   max_lot_size: 5.0
 
-  # Breakeven Alert (One-Time Alert at +100 pips)
+  # Breakeven Alert (One-Time Alert at +250 pips)
   breakeven_enabled: true
-  breakeven_activation_pips: 250        # Alert to move SL to entry at +100 pips ($10.00 on Gold)
+  breakeven_activation_pips: 250        # Alert to move SL to entry at +250 pips ($10.00 on Gold)
   trailing_stop_enabled: false          # Disabled — only initial signal and one-time breakeven alert
   friday_exit_hour: 21
   min_trade_duration_seconds: 240
@@ -114,12 +117,43 @@ strategy:
   # SMC Filter (Order Block + FVG Confluence)
   smc_filter_enabled: true
   smc_min_confluence_score: 20
+  smc_min_confluence_map:
+    SCALP_M5: 0         # M5 operates unhindered as pure liquidity wick sweeps (+176.91 PnL)
+    SCALP: 0            # M15 operates unhindered
+    DAY: 20             # H1 requires institutional OB/FVG confluence (+45.24 PnL, 50% WR)
+    SWING: 0            # SWING filtered via Macro HTF ADX instead
 
-  # ADX Range Filter — blocks signals when market is consolidating/ranging
-  # ADX < adx_min_threshold means the market has no directional momentum -> skip signal
+  # ADX Range Filter — blocks CONTINUATION (breakout) signals when the market is
+  # consolidating/ranging (ADX < threshold).
   adx_filter_enabled: true
-  adx_min_threshold: 20     # 0-100 scale: <25 = ranging/weak, >25 = trending
+  adx_min_threshold: 20     # 0-100 scale: <20 = ranging/weak, >20 = directional
   adx_period: 14
+  adx_min_threshold_map:
+    SCALP_M5: 20
+    SCALP: 20
+    DAY: 20
+    SWING: 20
+
+  # Higher Timeframe (HTF) ADX Macro Filter
+  # Requires the major timeframe trend to have directional strength (blocks signals during macro range)
+  htf_adx_filter_enabled: true
+  htf_adx_min_threshold_map:
+    DAY: 35             # Requires H4 ADX >= 35 (boosts DAY PF to 3.26)
+    SWING: 35           # Requires D1 ADX >= 35 (filters choppy SWING trades, boosting PF to 1.83)
+
+  # ── Reversal-sweep direction & risk ─────────────────────────────────────────
+  # Liquidity sweeps are REVERSAL setups, so they are evaluated in BOTH
+  # directions and are NOT locked to the lagging SMA-40 trend. A sweep that
+  # agrees with the trend lock is exhaustion and is deliberately ignored.
+  #
+  # sweep_allow_counter_macro:
+  #   true  -> a reversal sweep may fade a conflicting D1 EMA-20 macro trend
+  #            (required to catch a bottom/top before the D1 EMA rolls over).
+  #   false -> the D1 macro gate still blocks counter-macro sweeps (conservative).
+  sweep_allow_counter_macro: false
+  # Looser R:R floor for reversal sweeps (structure targets are often nearer than
+  # the 3.0R continuation floor, which would otherwise distort the target).
+  sweep_min_rr: 2.0
 
   # Active timeframe pairs to scan
   active_pairs:
@@ -144,11 +178,18 @@ strategy:
     XAUUSD:
       require_trend_alignment: true
       allow_entry_trend_only: true    # Follow entry TF when higher TF disagrees (D1 macro gate still blocks counter-trend)
-      rsi_confirmation: true          # Filter overbought buys / oversold sells
+      # Protective momentum filter: refuse to BUY when RSI > rsi_buy_threshold
+      # (overbought) or SELL when RSI < rsi_sell_threshold (oversold). Applied to
+      # the chosen setup, so it guards reversal sweeps as well as breakouts.
+      rsi_confirmation: true
+      # Allow reversal sweeps to fade a conflicting D1 macro trend (bottom/top
+      # catching). Set false to keep counter-macro sweeps blocked.
+      sweep_allow_counter_macro: true
 
 # ── Runtime & Health ───────────────────────────────────────────────────────────
 runtime:
   state_db_path: "runtime_state.db"
+  trades_csv_path: "trades.csv"
   scan_interval_seconds: 60             # Smooth, consistent 1-minute scan heartbeat
 
 health:

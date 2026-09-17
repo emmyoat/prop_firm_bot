@@ -112,7 +112,7 @@ class TwelveDataLoader:
         self._max_delay = float(retry_cfg.get("max_delay_seconds", 30.0))
         self._jitter_seconds = float(retry_cfg.get("jitter_seconds", 1.0))
         self._connect_timeout = float(retry_cfg.get("connect_timeout_seconds", 5.0))
-        self._read_timeout = float(retry_cfg.get("read_timeout_seconds", 15.0))
+        self._read_timeout = float(retry_cfg.get("read_timeout_seconds", 30.0))
 
         self.metrics: dict[str, Any] = {
             "requests": 0,
@@ -282,7 +282,17 @@ class TwelveDataLoader:
 
         td_symbol = self._to_td_symbol(symbol)
         td_interval = self._to_td_timeframe(timeframe)
-        request_bars = max(n_bars, 100)
+        
+        # Adaptive outputsize clamping based on timeframe to avoid timeouts on higher TFs
+        tf_upper = timeframe.upper()
+        if tf_upper in ("D1", "1DAY", "W1", "1WEEK"):
+            request_bars = min(max(n_bars, 50), 300)
+        elif tf_upper in ("H4", "4H"):
+            request_bars = min(max(n_bars, 50), 1000)
+        elif tf_upper in ("H1", "1H"):
+            request_bars = min(max(n_bars, 50), 2000)
+        else:
+            request_bars = min(max(n_bars, 100), 5000)
 
         try:
             params = {
@@ -292,6 +302,8 @@ class TwelveDataLoader:
                 "format": "JSON",
                 "order": "ASC",
             }
+            if td_interval not in ("1day", "1week", "1month"):
+                params["timezone"] = "UTC"
 
             logger.debug(f"TwelveData: Fetching {symbol} ({td_symbol}) {timeframe} ({td_interval}) x{request_bars}")
             data = self._request_json("time_series", params=params)
@@ -312,7 +324,7 @@ class TwelveDataLoader:
 
             # Standardise column names and types to match MT5DataLoader output
             df.rename(columns={"datetime": "time"}, inplace=True)
-            df["time"]   = pd.to_datetime(df["time"])
+            df["time"]   = pd.to_datetime(df["time"], utc=True)
             df["open"]   = pd.to_numeric(df["open"],   errors="coerce")
             df["high"]   = pd.to_numeric(df["high"],   errors="coerce")
             df["low"]    = pd.to_numeric(df["low"],    errors="coerce")

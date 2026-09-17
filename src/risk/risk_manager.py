@@ -58,7 +58,11 @@ class RiskManager:
 
         # Virtual paper account
         virtual_cfg = config.get("virtual_account", {})
-        self._initial_balance: float = virtual_cfg.get("balance", 10_000.0)
+        try:
+            configured_balance = float(virtual_cfg.get("balance", 10_000.0))
+        except (TypeError, ValueError):
+            configured_balance = 10_000.0
+        self._initial_balance: float = configured_balance
         state_path = config.get("runtime", {}).get("state_db_path", "runtime_state.db")
         self.state_store = state_store or StateStore(state_path)
 
@@ -82,21 +86,54 @@ class RiskManager:
         """Load the persisted account snapshot and apply any missed UTC rollover."""
         state = self.state_store.get_risk_state(self.magic_number)
         if state:
-            self.high_water_mark = float(state["high_water_mark"])
+            persisted_initial = float(state.get("initial_balance") or 0.0)
+            # Detect a balance-regime change (e.g. the operator edited
+            # virtual_account.balance in config.yaml). The persisted
+            # high-water-mark and daily baseline belong to the OLD regime and
+            # become meaningless against the new balance — carrying them
+            # forward produced an impossible HWM ($4,983 on a $1,000 account)
+            # and instantly tripped the overall-drawdown guard.
+            balance_changed = (
+                persisted_initial > 0
+                and abs(persisted_initial - self._initial_balance) > 0.01
+            )
+
             self.paper_pnl = float(state["paper_pnl"])
-            self.daily_starting_equity = float(state["daily_starting_equity"])
-            self.daily_pnl = float(state["daily_pnl"])
+            self.daily_pnl = float(state.get("daily_pnl", 0.0))
             self.signals_today = int(state["signals_today"])
             self.wins_today = int(state["wins_today"])
             self.losses_today = int(state["losses_today"])
             self.trading_date = state.get("trading_date") or self.trading_date
+
+            if balance_changed:
+                logger.warning(
+                    f"RiskManager: virtual_account.balance changed "
+                    f"(${persisted_initial:,.2f} -> ${self._initial_balance:,.2f}); "
+                    f"re-basing drawdown baseline and high-water-mark. Prior "
+                    f"high-water-mark ${float(state['high_water_mark']):,.2f} discarded."
+                )
+                self.initial_balance = self._initial_balance
+                self.daily_starting_equity = self._current_equity()
+                self.high_water_mark = max(self._current_equity(), self._initial_balance)
+            else:
+                # Never allow a HWM below the starting balance — that inverts
+                # the drawdown sign and silently disables the risk guard.
+                self.high_water_mark = max(
+                    float(state["high_water_mark"]), self._initial_balance
+                )
+                self.daily_starting_equity = float(state["daily_starting_equity"])
+
             logger.info(
                 f"RiskManager: Loaded state — HWM={self.high_water_mark:.2f}, "
                 f"PaperPnL={self.paper_pnl:.2f}, Date={self.trading_date}"
             )
         else:
-            self._save_state()
+            self.high_water_mark = self._initial_balance
+            self.daily_starting_equity = self._initial_balance
 
+        # Persist the reconciled snapshot so a corrected HWM/baseline is
+        # stamped immediately rather than only on the next state mutation.
+        self._save_state()
         self.ensure_daily_rollover()
         logger.info(
             f"RiskManager initialised | Virtual Balance: ${self._initial_balance:,.2f} | HWM: ${self.high_water_mark:,.2f}"
@@ -271,6 +308,9 @@ class RiskManager:
         `account_balance` defaults to current virtual equity if not supplied.
         """
         if stop_loss_dist <= 0:
+            logger.warning(
+                f"Risk: stop_loss_dist <= 0 ({stop_loss_dist}) for {symbol}. Cannot size."
+            )
             return 0.0
 
         balance = account_balance if account_balance is not None else self._current_equity()
@@ -297,6 +337,12 @@ class RiskManager:
         lot_floored = floor(raw_lot * 100) / 100.0
 
         if lot_floored < 0.01:
+            logger.warning(
+                f"Risk calc | symbol={symbol} | Balance=${balance:.2f} | Risk={risk_pct}% "
+                f"(${risk_amount:.2f}) | SL_dist={stop_loss_dist:.5f} | Loss/lot=${loss_per_lot:.2f} "
+                f"| raw_lot={raw_lot:.6f} < min-lot granularity 0.01 "
+                f"-> {'0.01' if raw_lot >= 0.0085 else '0.0'}"
+            )
             if raw_lot >= 0.0085:
                 return 0.01
             return 0.0

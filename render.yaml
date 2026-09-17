@@ -19,3 +19,5 @@ services:
         sync: false
       - key: STATE_DB_PATH
         value: /data/runtime_state.db
+      - key: TRADES_CSV_PATH
+        value: /data/trades.csv

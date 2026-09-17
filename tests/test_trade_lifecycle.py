@@ -706,5 +706,108 @@ def test_pending_order_pre_trigger_candles_ignored_after_trigger(memory_store):
     assert len(active) == 1
 
 
+def test_twelvedata_loader_requests_utc_timezone():
+    """
+    Ensure TwelveDataLoader explicitly passes timezone='UTC' to time_series endpoint
+    and standardises df['time'] to UTC-aware datetime.
+    """
+    from src.data.twelvedata_loader import TwelveDataLoader
+    config = {
+        "data_source": {
+            "api_key": "test_key",
+            "cache_seconds": 60,
+        }
+    }
+    loader = TwelveDataLoader(config, "test_key")
+    loader._request_json = MagicMock(return_value={
+        "values": [
+            {"datetime": "2026-09-02 11:10:00", "open": "4300.0", "high": "4305.0", "low": "4298.0", "close": "4302.0", "volume": "100"}
+        ]
+    })
+
+    df = loader.fetch_data("XAUUSD", "M5", n_bars=10)
+    assert df is not None
+    assert not df.empty
+    # Verify timezone='UTC' was in request params
+    loader._request_json.assert_called_once()
+    params = loader._request_json.call_args[1]["params"]
+    assert params["timezone"] == "UTC"
+    # Verify df['time'] is UTC-aware
+    assert df["time"].dt.tz is not None
+    assert str(df["time"].dt.tz) == "UTC"
+
+
+def test_pre_creation_completed_candle_strictly_excluded(memory_store):
+    """
+    Ensure historical candles that ended prior to trade creation timestamp
+    are strictly excluded and cannot falsely trigger pending orders or trigger TP/SL.
+    """
+    # Trade created at 11:12:05 UTC (SCALP_M5: candle duration = 300s)
+    trade = {
+        "trade_id": "XAUUSD_SCALP_M5_EXCLUDE_TEST",
+        "symbol": "XAUUSD",
+        "label": "SCALP_M5",
+        "direction": "SELL",
+        "entry": 4307.95,
+        "sl": 4314.87,
+        "tp": 4287.19,
+        "initial_sl": 4314.87,
+        "current_sl": 4314.87,
+        "is_stop_order": 1,
+        "triggered": 0,
+        "trigger_bar_time": "",
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4307.95,
+        "lowest_price": 4307.95,
+        "lot_size": 0.01,
+        "created_at": "2026-09-02T11:12:05+00:00",
+        "updated_at": "2026-09-02T11:12:05+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    # Bar 1 (11:05:00, ends 11:10:00 <= 11:12:05): Closed BEFORE trade created.
+    # Wicks crossed entry (low 4280.0 hits TP!) but it MUST be excluded.
+    # Bar 2 (11:10:00, ends 11:15:00 > 11:12:05): In-progress candle when trade was placed.
+    # Low is 4309.0 (above entry 4307.95) -> pending order should NOT trigger.
+    df = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 11:05:00", utc=True), "open": 4310.0, "high": 4315.0, "low": 4280.0, "close": 4308.0, "volume": 100},
+        {"time": pd.to_datetime("2026-09-02 11:10:00", utc=True), "open": 4309.5, "high": 4310.0, "low": 4309.0, "close": 4309.2, "volume": 100},
+    ])
+
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+    mock_notifier.token = "fake_token"
+    mock_notifier.chat_id = "fake_chat"
+
+    config = {
+        "risk": {
+            "breakeven_enabled": True,
+            "breakeven_activation_pips": 100,
+            "trailing_stop_enabled": False,
+            "pending_order_expiry_hours": 4,
+        },
+        "strategy": {
+            "active_pairs": [
+                {"low": "M5", "high": "H1", "label": "SCALP_M5"},
+            ]
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+
+    # No alerts sent (neither trigger nor TP/SL exit)
+    mock_notifier.send_trade_closed_alert.assert_not_called()
+    mock_notifier.send_breakeven_alert.assert_not_called()
+
+    # Trade remains untriggered
+    active = memory_store.get_active_trades()
+    assert len(active) == 1
+    assert active[0]["triggered"] == 0
+
+
+
 
 

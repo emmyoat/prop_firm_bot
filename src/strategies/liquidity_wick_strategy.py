@@ -19,6 +19,10 @@ class LiquidityWickStrategy(Strategy):
         self.require_trend_alignment = False   # Per-symbol: require both TFs to agree
         self.allow_entry_trend_only = False     # Per-symbol: relax alignment — follow entry TF if D1 macro agrees
         self.rsi_confirmation = False           # Per-symbol: RSI momentum filter
+        # Per-symbol: allow reversal sweeps that fade a conflicting D1 macro trend.
+        # Liquidity sweeps are REVERSAL setups, so they are evaluated in both
+        # directions independent of the lagging SMA trend lock (see docs below).
+        self.sweep_allow_counter_macro = config['strategy'].get('sweep_allow_counter_macro', False)
 
     def generate_signal(self, data: dict, symbol: str, label: str = "") -> Signal:
         """
@@ -53,10 +57,11 @@ class LiquidityWickStrategy(Strategy):
         # 1. Determine Market Structure (Trend TF & Entry TF)
         trend_major = self._get_trend(df_trend)
         trend_entry = self._get_trend(df_entry)
-        
-        # LOGGING
-        logger.debug(f"DEBUG: {symbol} TrendTF: {trend_major}, EntryTF: {trend_entry}")
+        logger.debug(f"{symbol} TrendTF: {trend_major.name}, EntryTF: {trend_entry.name}")
 
+        # `current_trend` is the CONTINUATION bias (breakouts). It is frozen by the
+        # lagging SMA-40 read. Liquidity sweeps below are REVERSAL setups and are
+        # evaluated in BOTH directions independently of this lock — see gate 6.
         current_trend = SignalType.NEUTRAL
         if trend_major == SignalType.BUY and trend_entry == SignalType.BUY:
             current_trend = SignalType.BUY
@@ -77,153 +82,167 @@ class LiquidityWickStrategy(Strategy):
              else:
                  current_trend = trend_entry
 
-        # ── D1 Macro Trend Gate ───────────────────────────────────────────────
-        # Uses EMA-20 on D1 — faster than SMA-50, prevents counter-trend signals
-        # without over-filtering valid setups during normal corrections.
+        # ── 2. D1 Macro Trend Gate ────────────────────────────────────────────
+        # Uses EMA-20 on D1. Continuation (breakout) setups must align with it.
+        # Reversal (sweep) setups may fade it ONLY when sweep_allow_counter_macro
+        # is enabled for the symbol.
         df_macro = data.get("MacroTF")
+        macro_trend = SignalType.NEUTRAL
         if df_macro is not None and len(df_macro) >= 20:
             macro_trend = self._get_macro_trend(df_macro)
-            if macro_trend != SignalType.NEUTRAL and macro_trend != current_trend:
-                logger.debug(
-                    f"{symbol} [{label}] MacroTF gate: D1 EMA-20={macro_trend.name} "
-                    f"conflicts with signal={current_trend.name} — blocked"
-                )
-                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
-                              f"D1 macro filter ({macro_trend.name} vs {current_trend.name})")
 
-
-
-        if current_trend == SignalType.NEUTRAL:
-             return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Structure Neutral")
-
-        # 2. ADX Range Filter — block signals in consolidating/ranging markets
+        # ── 3. ADX Range Filter ───────────────────────────────────────────────
+        # Blocks signals in consolidating/ranging markets. Gate text preserved.
         adx_enabled = self.config['strategy'].get('adx_filter_enabled', False)
-        if adx_enabled and len(df_entry) >= 28:
+        if adx_enabled:
             adx_period = self.config['strategy'].get('adx_period', 14)
-            adx_threshold = self.config['strategy'].get('adx_min_threshold', 20)
-            adx = self._calculate_adx(df_entry, adx_period)
-            logger.debug(f"DEBUG: {symbol} [{label}] ADX={adx:.1f} (threshold={adx_threshold})")
-            if adx < adx_threshold:
-                logger.info(f"DEBUG: {symbol} [{label}] ADX too low ({adx:.1f} < {adx_threshold}) — ranging market, skipping signal")
-                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"ADX too low ({adx:.1f} < {adx_threshold}) — ranging")
+            adx_threshold_map = self.config['strategy'].get('adx_min_threshold_map', {})
+            adx_threshold = adx_threshold_map.get(label, self.config['strategy'].get('adx_min_threshold', 20))
+            if len(df_entry) >= 28 and adx_threshold > 0:
+                adx = self._calculate_adx(df_entry, adx_period)
+                logger.debug(f"{symbol} [{label}] ADX={adx:.1f} (threshold={adx_threshold})")
+                if adx < adx_threshold:
+                    logger.debug(f"{symbol} [{label}] ADX too low ({adx:.1f} < {adx_threshold}) — ranging market, skipping signal")
+                    return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"ADX too low ({adx:.1f} < {adx_threshold}) — ranging")
 
-        # 3. RSI Confirmation Filter (optional per-symbol)
-        if self.rsi_confirmation and len(df_entry) > 20:
-            rsi = self._calculate_rsi(df_entry['close'], self.config['strategy'].get('rsi_period', 14))
-            
-            # Use configured thresholds if available, else standard 50 centerline
-            buy_limit = self.rsi_buy_threshold if hasattr(self, 'rsi_buy_threshold') else 50
-            sell_limit = self.rsi_sell_threshold if hasattr(self, 'rsi_sell_threshold') else 50
+            # Higher Timeframe (HTF) ADX Macro Filter
+            htf_adx_enabled = self.config['strategy'].get('htf_adx_filter_enabled', False)
+            if htf_adx_enabled and df_trend is not None and len(df_trend) >= 28:
+                htf_adx_map = self.config['strategy'].get('htf_adx_min_threshold_map', {})
+                htf_adx_threshold = htf_adx_map.get(label, self.config['strategy'].get('htf_adx_min_threshold', 0))
+                if htf_adx_threshold > 0:
+                    htf_adx = self._calculate_adx(df_trend, adx_period)
+                    logger.debug(f"{symbol} [{label}] HTF ADX={htf_adx:.1f} (threshold={htf_adx_threshold})")
+                    if htf_adx < htf_adx_threshold:
+                        logger.debug(f"{symbol} [{label}] HTF ADX too low ({htf_adx:.1f} < {htf_adx_threshold}) — macro ranging market, skipping signal")
+                        return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"HTF ADX too low ({htf_adx:.1f} < {htf_adx_threshold}) — macro ranging")
 
-            if current_trend == SignalType.BUY and rsi > buy_limit:
-                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too high for buy ({rsi:.0f} > {buy_limit})")
-            elif current_trend == SignalType.SELL and rsi < sell_limit:
-                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, f"RSI too low for sell ({rsi:.0f} < {sell_limit})")
+        # ── 4. RSI momentum-confirmation values (optional per-symbol) ──────────
+        # RSI is computed here and ENFORCED in the RSI gate below, once the setup
+        # (and therefore the trade direction) is known — the check is
+        # direction-aware, so it can only run after setup detection.
+        rsi_enabled = bool(self.rsi_confirmation)
+        rsi_value = float("nan")
+        if rsi_enabled and len(df_entry) > 20:
+            rsi_value = self._calculate_rsi(df_entry['close'], self.config['strategy'].get('rsi_period', 14))
 
-        # 4. Identify Liquidity (Recent Swing Points on Entry TF)
-        liquidity_level = self._find_recent_liquidity(df_entry, current_trend)
-        
-        if liquidity_level is None:
-             return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "No recent liquidity found")
-        
-        logger.info(f"DEBUG: {symbol} [{label}] Trend is {current_trend} (Major={trend_major}, Entry={trend_entry}). Checking for {current_trend} setups...")
-        # logger.debug(f"DEBUG: {symbol} Trend {current_trend}. Liquidity Level: {liquidity_level}")
-
-        # 5. Check for Sweep (Wick)
+        # ── 5. Identify Liquidity (Recent Swing Points on Entry TF) ────────────
+        window = df_entry.iloc[-self.lookback:-1]
+        support_level = window['low'].min()
+        resistance_level = window['high'].max()
         last_candle = df_entry.iloc[-1]
-        
+
+        logger.debug(
+            f"{symbol} [{label}] Continuation bias={current_trend.name} "
+            f"(Major={trend_major.name}, Entry={trend_entry.name}, Macro={macro_trend.name}). "
+            f"Sup={support_level:.5f} Res={resistance_level:.5f}"
+        )
+
+        # ── 6. Setup Detection ─────────────────────────────────────────────────
+        # SWEEP  = reversal: evaluated BOTH ways, independent of the trend lock.
+        # BREAKOUT = continuation: must agree with the trend lock.
         signal_type = SignalType.NEUTRAL
-        stop_loss = 0.0
-        
-        if current_trend == SignalType.BUY:
-            # 1. SWEEP BUY (Reversal at Lows)
-            # Find Support Level
-            support_level = liquidity_level # Already found min()
-            
-            # Check for Sweep (Wick Rejection)
-            # STRICT: Candle MUST be Green (Close > Open) to confirm buyer strength
-            if last_candle['low'] < support_level and last_candle['close'] > support_level and last_candle['close'] > last_candle['open']:
-                # Check Wick Quality
-                body_size = abs(last_candle['close'] - last_candle['open'])
-                lower_wick = last_candle['open'] - last_candle['low'] if last_candle['open'] < last_candle['close'] else last_candle['close'] - last_candle['low']
-                total_range = last_candle['high'] - last_candle['low']
-                
-                ratio = lower_wick / total_range if total_range > 0 else 0
-                if total_range > 0 and ratio >= self.wick_threshold_ratio:
-                    signal_type = SignalType.BUY
-                    stop_loss = last_candle['low'] 
-                    price = last_candle['close']
-                    # Limit logic handled below
-                else:
-                    logger.info(f"DEBUG: {symbol} Low-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
+        entry_candle = None
+        setup_comment = ""
+
+        total_range = last_candle['high'] - last_candle['low']
+
+        # 6a. Bullish reversal sweep — sweep a recent low, close back above it,
+        # green, AND fade the continuation bias (a bullish sweep while the bias is
+        # already BUY is continuation, handled as a breakout below).
+        if (total_range > 0
+                and current_trend != SignalType.BUY
+                and last_candle['low'] < support_level
+                and last_candle['close'] > support_level
+                and last_candle['close'] > last_candle['open']):
+            lower_wick = min(last_candle['open'], last_candle['close']) - last_candle['low']
+            ratio = lower_wick / total_range
+            if ratio >= self.wick_threshold_ratio:
+                signal_type = SignalType.BUY
+                entry_candle = last_candle
+                setup_comment = "Liquidity Sweep (bullish reversal)"
             else:
-                 # Debug: Why no sweep buy?
-                 if last_candle['low'] < support_level and last_candle['close'] > support_level:
-                     logger.info(f"DEBUG: {symbol} Sweep Buy Rejected: Candle not Green (Close {last_candle['close']} !> Open {last_candle['open']})")
-            
-            # 2. BREAKOUT BUY (Continuation through Highs)
-            # We need to find Resistance Level
-            resistance_level = df_entry.iloc[-self.lookback:-1]['high'].max()
-            
-            # Check for Breakout (Strong Close above Resistance)
-            if last_candle['close'] > resistance_level and last_candle['open'] < last_candle['close']:
-                # Filter: Strong Body (Momentum)
-                body = last_candle['close'] - last_candle['open']
-                total = last_candle['high'] - last_candle['low']
-                if total > 0 and (body / total) >= 0.50: # Body is >= 50% of candle
-                    signal_type = SignalType.BUY
-                    stop_loss = last_candle['low'] # SL below breakout candle
-                    price = last_candle['close']
-                    # Breakouts are immediate market entries
-                else:
-                     logger.info(f"DEBUG: {symbol} Buy-Breakout: Weak Body {(body/total):.2f} < 0.50")
+                logger.debug(f"{symbol} [{label}] Low-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
+
+        # 6b. Bearish reversal sweep — sweep a recent high, close back below it,
+        # red, AND fade the continuation bias (this is precisely the bar that used
+        # to fire a false SELL at the bottom of a decline).
+        elif (total_range > 0
+                and current_trend != SignalType.SELL
+                and last_candle['high'] > resistance_level
+                and last_candle['close'] < resistance_level
+                and last_candle['close'] < last_candle['open']):
+            upper_wick = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+            ratio = upper_wick / total_range
+            if ratio >= self.wick_threshold_ratio:
+                signal_type = SignalType.SELL
+                entry_candle = last_candle
+                setup_comment = "Liquidity Sweep (bearish reversal)"
             else:
-                 logger.info(f"DEBUG: {symbol} No Buy Setup (Close {last_candle['close']:.5f} !> Res {resistance_level:.5f})")
-        
-        elif current_trend == SignalType.SELL:
-            # 1. SWEEP SELL (Reversal at Highs)
-            resistance_level = liquidity_level # Already found max()
-            
-            if last_candle['high'] > resistance_level and last_candle['close'] < resistance_level and last_candle['close'] < last_candle['open']:
-                # Check Wick Quality
-                upper_wick = last_candle['high'] - last_candle['open'] if last_candle['open'] > last_candle['close'] else last_candle['high'] - last_candle['close']
-                total_range = last_candle['high'] - last_candle['low']
-                
-                ratio = upper_wick / total_range if total_range > 0 else 0
-                if total_range > 0 and ratio >= self.wick_threshold_ratio:
-                    signal_type = SignalType.SELL
-                    stop_loss = last_candle['high']
-                    price = last_candle['close']
+                logger.debug(f"{symbol} [{label}] High-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
+
+        # 6c. Breakout continuation — must agree with the frozen trend lock.
+        if signal_type == SignalType.NEUTRAL:
+            if current_trend == SignalType.BUY:
+                if last_candle['close'] > resistance_level and last_candle['close'] > last_candle['open']:
+                    body = last_candle['close'] - last_candle['open']
+                    if total_range > 0 and (body / total_range) >= 0.50:
+                        signal_type = SignalType.BUY
+                        entry_candle = last_candle
+                        setup_comment = "Liquidity Breakout (continuation)"
+                    else:
+                        logger.debug(f"{symbol} [{label}] Buy-Breakout: Weak Body")
                 else:
-                    logger.info(f"DEBUG: {symbol} High-Test: Ratio {ratio:.2f} < {self.wick_threshold_ratio}")
-            else:
-                 if last_candle['high'] > resistance_level and last_candle['close'] < resistance_level:
-                     logger.info(f"DEBUG: {symbol} Sweep Sell Rejected: Candle not Red (Close {last_candle['close']} !< Open {last_candle['open']})")
-            
-            # 2. BREAKOUT SELL (Continuation through Lows)
-            support_level = df_entry.iloc[-self.lookback:-1]['low'].min()
-            
-            if last_candle['close'] < support_level and last_candle['open'] > last_candle['close']:
-                # Filter: Strong Body
-                body = last_candle['open'] - last_candle['close']
-                total = last_candle['high'] - last_candle['low']
-                if total > 0 and (body / total) >= 0.50:
-                    signal_type = SignalType.SELL
-                    stop_loss = last_candle['high']
-                    price = last_candle['close']
+                    logger.debug(f"{symbol} [{label}] No Buy Setup (Close {last_candle['close']:.5f} !> Res {resistance_level:.5f})")
+            elif current_trend == SignalType.SELL:
+                if last_candle['close'] < support_level and last_candle['close'] < last_candle['open']:
+                    body = last_candle['open'] - last_candle['close']
+                    if total_range > 0 and (body / total_range) >= 0.50:
+                        signal_type = SignalType.SELL
+                        entry_candle = last_candle
+                        setup_comment = "Liquidity Breakout (continuation)"
+                    else:
+                        logger.debug(f"{symbol} [{label}] Sell-Breakout: Weak Body")
                 else:
-                    logger.info(f"DEBUG: {symbol} Sell-Breakout: Weak Body {(body/total):.2f} < 0.50")
+                    logger.debug(f"{symbol} [{label}] No Sell Setup (Close {last_candle['close']:.5f} !< Supp {support_level:.5f})")
             else:
-                 logger.info(f"DEBUG: {symbol} No Sell Setup (Close {last_candle['close']:.5f} !< Supp {support_level:.5f})")
+                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, "Structure Neutral")
 
         if signal_type != SignalType.NEUTRAL:
-            # VALIDATION: Use STOP ORDERS to confirm breakout.
-            # Instead of entering at Market, we place a STOP order at the wick extreme.
-            
-            is_stop_order = True
+            is_sweep = "Sweep" in setup_comment
 
-            last_candle = df_entry.iloc[-1]
-            
+            # ── Macro gate (applied to the CHOSEN setup) ──────────────────────
+            if macro_trend != SignalType.NEUTRAL and macro_trend != signal_type:
+                if not (is_sweep and self.sweep_allow_counter_macro):
+                    logger.debug(
+                        f"{symbol} [{label}] MacroTF gate: D1 EMA-20={macro_trend.name} "
+                        f"conflicts with {setup_comment} — blocked"
+                    )
+                    return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                                  f"D1 macro filter ({macro_trend.name} vs {signal_type.name})")
+
+            # ── RSI gate (applied to the CHOSEN setup) ────────────────────────
+            # Protective exhaustion filter: never BUY into overbought momentum or
+            # SELL into oversold momentum — that is fading exhausted momentum and
+            # was the cause of the near-bottom false-positive SELL breakouts.
+            # Applied to the chosen setup so reversal sweeps are guarded too.
+            if rsi_enabled and not pd.isna(rsi_value):
+                buy_limit = self.rsi_buy_threshold if hasattr(self, 'rsi_buy_threshold') else 70
+                sell_limit = self.rsi_sell_threshold if hasattr(self, 'rsi_sell_threshold') else 30
+                if signal_type == SignalType.SELL and rsi_value < sell_limit:
+                    logger.debug(f"{symbol} [{label}] RSI exhaustion guard: no SELL while oversold (RSI {rsi_value:.0f} < {sell_limit})")
+                    return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                                  comment=f"RSI too low for sell ({rsi_value:.0f} < {sell_limit})")
+                if signal_type == SignalType.BUY and rsi_value > buy_limit:
+                    logger.debug(f"{symbol} [{label}] RSI exhaustion guard: no BUY while overbought (RSI {rsi_value:.0f} > {buy_limit})")
+                    return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                                  comment=f"RSI too high for buy ({rsi_value:.0f} > {buy_limit})")
+
+            # Sweeps enter at the wick extreme with a tiny confirmation buffer.
+            is_stop_order = True
+            last_candle = entry_candle
+            price = 0.0
+
             # --- VOLATILITY-BASED RISK (ATR) ---
             entry_multiplier = self.config['strategy'].get('entry_atr_multiplier', 0.1)
             atr_period = self.config['strategy'].get('atr_period', 14)
@@ -271,7 +290,7 @@ class LiquidityWickStrategy(Strategy):
                 else:
                     stop_loss = price + sl_dist
 
-                logger.info(f"DEBUG: {symbol} [{label}] SL Mode=ATR | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f} (ATR={valid_atr:.2f}, Mult={sl_atr_mult:.2f})")
+                logger.debug(f"{symbol} [{label}] SL Mode=ATR | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f} (ATR={valid_atr:.2f}, Mult={sl_atr_mult:.2f})")
             else:
                 # Legacy: opposite side of signal candle + buffer
                 atr_multiplier = self.config['strategy'].get('atr_multiplier', 1.5)
@@ -293,23 +312,16 @@ class LiquidityWickStrategy(Strategy):
                 else:
                     stop_loss = last_candle['high'] + sl_buffer_price
 
-                logger.info(f"DEBUG: {symbol} [{label}] SL Mode=CandleExtreme | Price={price:.5f} | SL={stop_loss:.5f}")
-            
-            # 4. RSI Filter (Optimization for Higher Win Rate)
-            rsi_period = self.config['strategy'].get('rsi_period', 14)
-            rsi_value = self._calculate_rsi(df_entry['close'], rsi_period)
-            
-            # Simple Filter: If Trend is BUY, we want RSI to be somewhat oversold (pullback)
-            # or at least NOT overbought.
-            # User wants 85% WR. Let's be strict: RSI < 50 for Buy? Or RSI < 30?
-            # RSI < 30 is rare. Let's try RSI < 55 (buying dip) and RSI > 45 (selling rally).
+                logger.debug(f"{symbol} [{label}] SL Mode=CandleExtreme | Price={price:.5f} | SL={stop_loss:.5f}")
 
+            # Take Profit — reversals may use a looser R:R floor (config sweep_min_rr)
+            min_rr_override = self.config['strategy'].get('sweep_min_rr') if is_sweep else None
+            tp_price = self._find_target(df_entry, signal_type, price, stop_loss,
+                                         min_rr_override=min_rr_override)
 
-            # Define Take Profit (Targeting recent structure with Cap)
-            tp_price = self._find_target(df_entry, signal_type, price, stop_loss)
-
-
-            return Signal(symbol, signal_type, price, stop_loss, tp_price, is_stop_order=is_stop_order, comment="Liquidity Wick Sweep")
+            logger.debug(f"{symbol} [{label}] {setup_comment} | Price={price:.5f} | SL={stop_loss:.5f} | TP={tp_price:.5f}")
+            return Signal(symbol, signal_type, price, stop_loss, tp_price,
+                          is_stop_order=is_stop_order, comment=setup_comment)
 
         return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0)
 
@@ -353,7 +365,8 @@ class LiquidityWickStrategy(Strategy):
             
         return None
 
-    def _find_target(self, df: pd.DataFrame, signal_type: SignalType, entry_price: float, sl_price: float = 0.0) -> float:
+    def _find_target(self, df: pd.DataFrame, signal_type: SignalType, entry_price: float,
+                     sl_price: float = 0.0, min_rr_override: float = None) -> float:
         """
         Finds the Take Profit target.
         Hybrid Approach:
@@ -368,8 +381,11 @@ class LiquidityWickStrategy(Strategy):
         if risk == 0:
             risk = 0.0010  # Fallback 10 pips equivalent
         
-        # Minimum R:R floor (at least 3.0R) and Max R:R Cap
-        min_rr = self.risk_reward_ratio if self.risk_reward_ratio > 0 else 3.0
+        # Minimum R:R floor (at least 3.0R) and Max R:R Cap.
+        # Reversal sweeps may pass a looser floor so a counter-trend entry is not
+        # forced to chase a structure target it cannot realistically reach.
+        min_rr = min_rr_override if (min_rr_override and min_rr_override > 0) else (
+            self.risk_reward_ratio if self.risk_reward_ratio > 0 else 3.0)
         max_rr = self.config['strategy'].get('max_risk_reward_ratio', 5.0)
 
         # Check for Infinite TP (Runner Mode)

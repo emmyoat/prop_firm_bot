@@ -24,3 +24,7 @@ venv/
 .vscode/
 .idea/
 .vercel
+
+# Cache
+.cache/
+diagnostics/

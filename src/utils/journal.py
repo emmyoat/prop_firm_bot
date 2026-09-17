@@ -19,6 +19,9 @@ class TradeJournal:
                 "Profit", "Commission", "Swap", "Total PnL", "Session", "Comment"
             ]
             try:
+                parent_dir = os.path.dirname(self.filename)
+                if parent_dir:
+                    os.makedirs(parent_dir, exist_ok=True)
                 with open(self.filename, mode='w', newline='') as f:
                     writer = csv.writer(f)
                     writer.writerow(headers)

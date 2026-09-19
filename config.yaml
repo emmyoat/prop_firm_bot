@@ -107,7 +107,7 @@ strategy:
     SWING: 1.5
   max_sl_pips_map:
     DAY: 200            # Cap DAY SL at 200 pips ($20.00 on Gold)
-    SCALP: 150          # Cap SCALP SL at 150 pips ($15.00 on Gold)
+    SCALP: 100           # Cap SCALP SL at 80 pips ($8.00 on Gold, aligned with SCALP_M5)
     SCALP_M5: 80        # Cap SCALP_M5 SL at 80 pips ($8.00 on Gold)
     SWING: 350          # Cap SWING SL at 350 pips ($35.00 on Gold)
   tp_mode: "dynamic"        # Options: "structured", "dynamic", "fixed_rr"
@@ -119,7 +119,7 @@ strategy:
   smc_min_confluence_score: 20
   smc_min_confluence_map:
     SCALP_M5: 0         # M5 operates unhindered as pure liquidity wick sweeps (+176.91 PnL)
-    SCALP: 0            # M15 operates unhindered
+    SCALP: 20           # M15 requires institutional OB/FVG confluence to avoid chop/late entries
     DAY: 20             # H1 requires institutional OB/FVG confluence (+45.24 PnL, 50% WR)
     SWING: 0            # SWING filtered via Macro HTF ADX instead
 

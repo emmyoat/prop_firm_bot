@@ -17,8 +17,6 @@ import sys
 import logging
 import time
 import os
-from datetime import datetime
-from math import floor
 
 import pandas as pd
 import numpy as np
@@ -30,7 +28,7 @@ from src.utils.logger import setup_logger
 from src.data.twelvedata_loader import TwelveDataLoader
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
 from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
-from src.models import SignalType, Signal
+from src.models import SignalType
 
 # Suppress noisy logs during backtest
 logger = setup_logger(log_level="WARNING", log_file=None)

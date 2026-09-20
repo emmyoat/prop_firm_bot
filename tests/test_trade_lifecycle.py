@@ -1,6 +1,5 @@
 import pandas as pd
 import pytest
-from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 from src.utils.state_store import StateStore

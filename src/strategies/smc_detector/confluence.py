@@ -155,37 +155,3 @@ def _zones_overlap(z1_bottom: float, z1_top: float,
     """Check if two price zones overlap."""
     return z1_bottom <= z2_top and z2_bottom <= z1_top
 
-
-def filter_signals_by_confluence(
-    signals: list,
-    df: pd.DataFrame,
-    min_score: int = 50
-) -> list:
-    """
-    Filter a list of signals to only include those with sufficient confluence.
-    
-    This is a helper for backtesting integration.
-    """
-    from .fvg_detector import get_active_fvg_zones
-    from .order_block import get_active_order_blocks
-    
-    fvgs = get_active_fvg_zones(df)
-    obs = get_active_order_blocks(df)
-    
-    filtered = []
-    for signal in signals:
-        score, zone = calculate_confluence_score(
-            current_price=df.iloc[-1]['close'],
-            signal_type=signal.signal_type.name,
-            order_blocks=obs,
-            fvg_zones=fvgs,
-            entry_price=signal.price,
-            stop_loss=signal.sl_price
-        )
-        
-        if score >= min_score:
-            signal.confluence_score = score
-            signal.smc_zone = zone
-            filtered.append(signal)
-    
-    return filtered

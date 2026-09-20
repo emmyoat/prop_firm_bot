@@ -4,7 +4,6 @@ Stats Reporter — Paper Account / Signal-Only Mode
 Calculates and formats performance stats without MT5.
 """
 
-from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger("PropBot.Stats")

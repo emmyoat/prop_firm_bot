@@ -23,8 +23,6 @@ if hasattr(sys.stderr, "reconfigure"):
 import logging
 import time
 import os
-from datetime import datetime
-from math import floor
 
 import pandas as pd
 import numpy as np

@@ -347,24 +347,6 @@ class LiquidityWickStrategy(Strategy):
             return SignalType.SELL
         return SignalType.NEUTRAL
 
-    def _find_recent_liquidity(self, df: pd.DataFrame, trend: SignalType) -> float:
-        # If Bullish, we look for recent SELL SIDE Liquidity (previous Lows) to be swept.
-        # If Bearish, we look for recent BUY SIDE Liquidity (previous Highs) to be swept.
-        
-        # Look back N candles to capture the significant High/Low before the shift
-        window = df.iloc[-self.lookback:-1] # Exclude current candle
-        
-        if trend == SignalType.BUY:
-            # We are verifying a BUY setup, so we look for valid Support (Lows)
-            # OR if we are looking for a TARGET for a Sell trade (TP), we look for Lows.
-            return window['low'].min()
-        elif trend == SignalType.SELL:
-             # We are verifying a SELL setup, so we look for Resistance (Highs)
-             # OR if we are looking for a TARGET for a Buy trade (TP), we look for Highs.
-            return window['high'].max()
-            
-        return None
-
     def _find_target(self, df: pd.DataFrame, signal_type: SignalType, entry_price: float,
                      sl_price: float = 0.0, min_rr_override: float = None) -> float:
         """

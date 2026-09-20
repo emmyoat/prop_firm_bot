@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import pytest
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy

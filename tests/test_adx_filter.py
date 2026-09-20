@@ -1,7 +1,6 @@
 """Tests for the ADX Range Filter in LiquidityWickStrategy."""
 import numpy as np
 import pandas as pd
-import pytest
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
 from src.models import SignalType
 

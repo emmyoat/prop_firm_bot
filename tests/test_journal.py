@@ -1,52 +1,46 @@
-import os
-import sys
-from unittest.mock import MagicMock
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
+from pathlib import Path
 from src.utils.journal import TradeJournal
 
-def test_journal():
-    print("Starting TradeJournal Verification...")
-    
-    # Remove existing test file if exists
-    test_file = "test_trades.csv"
-    if os.path.exists(test_file):
-        os.remove(test_file)
-        
-    journal = TradeJournal(filename=test_file)
-    
-    # Mock MT5 Deal Objects
-    mock_entry = MagicMock()
-    mock_entry.time = 1736368800 # 2026-01-08 20:40:00
-    mock_entry.type = 0 # BUY
-    mock_entry.price = 2030.50
-    mock_entry.comment = "Liquidity Wick Sweep (BUY)"
-    
-    mock_exit = MagicMock()
-    mock_exit.position_id = 987654321
-    mock_exit.symbol = "XAUUSD"
-    mock_exit.time = 1736369100 # 2026-01-08 20:45:00 (5 min duration)
-    mock_exit.price = 2035.00
-    mock_exit.volume = 0.1
-    mock_exit.profit = 45.00
-    mock_exit.commission = -0.50
-    mock_exit.swap = 0.0
-    
-    # Log the mock trade
-    journal.log_trade(mock_exit, mock_entry)
-    
-    # Verify file exists and has content
-    assert os.path.exists(test_file), "CSV File not created."
-    with open(test_file, 'r') as f:
-        lines = f.readlines()
-        print(f"File created with {len(lines)} lines.")
-        assert len(lines) == 2, f"Unexpected line count: {len(lines)}"
-        print(f"Last Line: {lines[-1].strip()}")
 
-if __name__ == "__main__":
-    if test_journal():
-        print("\nVerification Passed! Journaling is working correctly.")
-    else:
-        print("\nVerification Failed.")
-        sys.exit(1)
+def test_log_virtual_trade(tmp_path: Path):
+    test_csv = tmp_path / "test_trades.csv"
+    journal = TradeJournal(filename=str(test_csv))
+
+    virtual_trade = {
+        "trade_id": "987654321",
+        "symbol": "XAUUSD",
+        "direction": "BUY",
+        "label": "SCALP_M5",
+        "entry": 2030.50,
+        "current_sl": 2025.00,
+        "current_tp": 2045.00,
+        "lot_size": 0.1,
+        "created_at": "2026-01-08T20:40:00Z",
+    }
+
+    journal.log_virtual_trade(
+        trade=virtual_trade,
+        exit_type="TP",
+        exit_price=2045.00,
+        pnl_pips=145.0,
+        session="New York",
+    )
+
+    assert test_csv.exists()
+    lines = test_csv.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2, f"Expected header + 1 trade row, got {len(lines)}"
+
+    header = lines[0].split(",")
+    assert header[0] == "Ticket"
+    assert "Symbol" in header
+    assert "Total PnL" in header
+
+    trade_row = lines[1].split(",")
+    assert trade_row[0] == "987654321"
+    assert trade_row[1] == "XAUUSD"
+    assert trade_row[2] == "BUY"
+    assert float(trade_row[7]) == 2030.50
+    assert float(trade_row[8]) == 2045.00
+    assert float(trade_row[9]) == 145.0
+    assert trade_row[13] == "New York"
+    assert "SCALP_M5 TP" in trade_row[14]

@@ -1,6 +1,5 @@
 import logging
 import sys
-import os
 
 def setup_logger(name="PropBot", log_level=logging.INFO, log_file=None):
     """

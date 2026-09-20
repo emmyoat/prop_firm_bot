@@ -13,6 +13,7 @@ import sys
 import socket
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from src.utils.logger import setup_logger
 from src.utils.config_loader import load_config, load_credentials
@@ -69,29 +70,63 @@ TICK_SIZE_MAP = {
 }
 
 
-def get_active_session(config: dict) -> str:
+def is_market_closed(config: dict, now: Optional[datetime] = None) -> bool:
+    """Returns True if the forex/metals market is closed for the weekend.
+
+    Market closes Friday at `friday_exit_hour` (default 21:00 UTC)
+    and re-opens Sunday at `sunday_open_hour` (default 21:00 UTC).
+    Closed all day Saturday.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    weekday = now.weekday()  # Mon=0, Fri=4, Sat=5, Sun=6
+    risk_cfg = config.get("risk", {})
+    friday_exit_hour = risk_cfg.get("friday_exit_hour", 21)
+    sunday_open_hour = risk_cfg.get("sunday_open_hour", 21)
+
+    # Friday after market close
+    if weekday == 4 and now.hour >= friday_exit_hour:
+        return True
+    # Saturday all day
+    if weekday == 5:
+        return True
+    # Sunday before market open
+    if weekday == 6 and now.hour < sunday_open_hour:
+        return True
+
+    return False
+
+
+def is_friday_close(config: dict, now: Optional[datetime] = None) -> bool:
+    """Backward-compatible alias for is_market_closed."""
+    return is_market_closed(config, now)
+
+
+def get_active_session(config: dict, now: Optional[datetime] = None) -> str:
+    if is_market_closed(config, now):
+        return "Market-Closed"
     sessions = config["system"].get("active_sessions", [])
     if not sessions:
         return "24/7"
-    utc_hour = datetime.now(timezone.utc).hour
+    if now is None:
+        now = datetime.now(timezone.utc)
+    utc_hour = now.hour
     for s in sessions:
         if s["start_utc"] <= utc_hour < s["end_utc"]:
             return s["name"]
     return "Off-Hours"
 
 
-def in_active_session(config: dict) -> bool:
+def in_active_session(config: dict, now: Optional[datetime] = None) -> bool:
+    if is_market_closed(config, now):
+        return False
     sessions = config["system"].get("active_sessions", [])
     if not sessions:
         return True
-    utc_hour = datetime.now(timezone.utc).hour
+    if now is None:
+        now = datetime.now(timezone.utc)
+    utc_hour = now.hour
     return any(s["start_utc"] <= utc_hour < s["end_utc"] for s in sessions)
-
-
-def is_friday_close(config: dict) -> bool:
-    now = datetime.now(timezone.utc)
-    exit_hour = config["risk"].get("friday_exit_hour", 21)
-    return now.weekday() == 4 and now.hour >= exit_hour
 
 
 def main():
@@ -183,6 +218,7 @@ def main():
     journal = TradeJournal(trades_csv_path)
     logger.info(f"Trade journal: {trades_csv_path}")
     last_report_time = time.time()
+    last_market_closed_log = 0.0
 
     symbols      = config["system"]["symbol_list"]
     active_pairs = config["strategy"].get("active_pairs", [{"low": "H4", "high": "D1", "label": "SWING"}])
@@ -198,6 +234,7 @@ def main():
             health.evaluate()
             for transition in health.drain_transitions():
                 _send_health_transition(notifier, transition, logger)
+
             # Keep fetching while degraded or unhealthy so the data source can
             # recover. Failed fetches below suppress signal processing naturally.
             # ── Daily API Budget Check ─────────────────────────────────────────
@@ -206,17 +243,26 @@ def main():
                 time.sleep(300)
                 continue
 
-            # ── Friday close check ────────────────────────────────────────────
-            if is_friday_close(config):
-                logger.warning("FRIDAY EXIT: Halting new signals for the weekend.")
-                time.sleep(300)
-                continue
-
             # ── Telegram command handling ─────────────────────────────────────
+            # Process Telegram commands first so /status, /health, /stats remain
+            # responsive even when markets are closed without polling TwelveData.
             if config["telegram"]["enabled"] and tg_token and tg_chat_id:
                 commands = notifier.get_updates()
                 for cmd in commands:
                     _handle_telegram_command(cmd, notifier, risk_manager, stats_reporter, logger)
+
+            # ── Weekend / Market Closed check ─────────────────────────────────
+            if is_market_closed(config):
+                now_utc = datetime.now(timezone.utc)
+                sun_open = config.get("risk", {}).get("sunday_open_hour", 21)
+                if time.time() - last_market_closed_log >= 1800:
+                    logger.info(
+                        f"MARKET CLOSED: Weekend pause active ({now_utc.strftime('%A %H:%M UTC')}). "
+                        f"TwelveData API requests and signal generation halted until Sunday {sun_open:02d}:00 UTC."
+                    )
+                    last_market_closed_log = time.time()
+                time.sleep(60)
+                continue
 
             # ── Drawdown / profit target checks ───────────────────────────────
             breached, breach_reason = risk_manager.check_emergency_exit()

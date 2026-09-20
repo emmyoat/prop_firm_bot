@@ -69,6 +69,7 @@ risk:
   breakeven_activation_pips: 250        # Alert to move SL to entry at +250 pips ($10.00 on Gold)
   trailing_stop_enabled: false          # Disabled — only initial signal and one-time breakeven alert
   friday_exit_hour: 21
+  sunday_open_hour: 21                  # Market reopens Sunday at 21:00 UTC
   min_trade_duration_seconds: 240
   pending_order_expiry_hours: 4
 
@@ -119,7 +120,7 @@ strategy:
   smc_min_confluence_score: 20
   smc_min_confluence_map:
     SCALP_M5: 0         # M5 operates unhindered as pure liquidity wick sweeps (+176.91 PnL)
-    SCALP: 20           # M15 requires institutional OB/FVG confluence to avoid chop/late entries
+    SCALP: 0           # M15 requires institutional OB/FVG confluence to avoid chop/late entries
     DAY: 20             # H1 requires institutional OB/FVG confluence (+45.24 PnL, 50% WR)
     SWING: 0            # SWING filtered via Macro HTF ADX instead
 

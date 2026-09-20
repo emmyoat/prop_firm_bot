@@ -195,7 +195,7 @@ def main():
 
     if tg_token and tg_chat_id:
         logger.info(f"Telegram alerts enabled (Chat ID: ...{str(tg_chat_id)[-4:]})") 
-        notifier.send_message("⚡ *PropBot Signal Engine Started*")
+        notifier.send_message("⚡ *NimsBot Signal Engine Started*")
     else:
         logger.warning("Telegram token/chat_id missing — notifications disabled.")
 
@@ -469,7 +469,7 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("Bot stopping...")
-        notifier.send_message("*PropBot Signal Engine stopped.*")
+        notifier.send_message("*NimsBot Signal Engine stopped.*")
     finally:
         state_store.set_runtime_value("last_clean_shutdown", True)
         state_store.set_runtime_value("process_stopped_at", datetime.now(timezone.utc).isoformat())

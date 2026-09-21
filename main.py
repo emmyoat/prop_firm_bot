@@ -129,6 +129,45 @@ def in_active_session(config: dict, now: Optional[datetime] = None) -> bool:
     return any(s["start_utc"] <= utc_hour < s["end_utc"] for s in sessions)
 
 
+def sort_active_pairs_by_hierarchy(pairs: list[dict]) -> list[dict]:
+    """
+    Sorts active timeframe pairs macro-to-micro (higher timeframes first).
+    Ensures higher timeframe market structure takes precedence over lower timeframes.
+    """
+    tf_ranks = {
+        "MN": 9, "W1": 8, "D1": 7, "H4": 6, "H1": 5,
+        "M30": 4, "M15": 3, "M5": 2, "M1": 1
+    }
+
+    def _rank(pair: dict) -> tuple[int, int]:
+        high = tf_ranks.get(str(pair.get("high", "")).upper(), 0)
+        low = tf_ranks.get(str(pair.get("low", "")).upper(), 0)
+        return (-high, -low)
+
+    return sorted(pairs, key=_rank)
+
+
+def check_directional_conflict(
+    active_trades: list[dict],
+    candidate_signal_type: str,
+    allow_opposing: bool = False,
+) -> tuple[bool, str]:
+    """
+    Checks if a candidate signal conflicts with existing active trades for the symbol.
+    Prevents holding simultaneous opposing positions (hedging) on the same asset.
+    Returns (is_allowed, reason).
+    """
+    if allow_opposing:
+        return True, ""
+
+    opposing = [t for t in active_trades if t.get("direction") != candidate_signal_type]
+    if opposing:
+        opp_labels = ", ".join(f"{t.get('label', 'UNKNOWN')}:{t.get('direction', '')}" for t in opposing)
+        return False, f"Opposing active trade already exists: {opp_labels}"
+
+    return True, ""
+
+
 def main():
     # ── CLI args ──────────────────────────────────────────────────────────────
     parser = argparse.ArgumentParser(description="Prop Firm Signal Bot")
@@ -226,7 +265,9 @@ def main():
     last_market_closed_log = 0.0
 
     symbols      = config["system"]["symbol_list"]
-    active_pairs = config["strategy"].get("active_pairs", [{"low": "H4", "high": "D1", "label": "SWING"}])
+    raw_pairs    = config["strategy"].get("active_pairs", [{"low": "H4", "high": "D1", "label": "SWING"}])
+    active_pairs = sort_active_pairs_by_hierarchy(raw_pairs)
+    logger.info(f"Active pairs (hierarchy order): {', '.join(p.get('label', '') for p in active_pairs)}")
 
     logger.info("Bot initialised. Entering signal scan loop...")
     logger.info(f"Watching: {', '.join(symbols)}")
@@ -350,6 +391,12 @@ def main():
                         df_macro = None
                         if tf_high != "D1":
                             df_macro = data_loader.fetch_data(symbol, "D1", n_bars=100)
+                            if config.get("strategy", {}).get("fail_closed_macro_gate", True):
+                                if df_macro is None or len(df_macro) < 20:
+                                    logger.warning(
+                                        f"[{label}] {symbol}: D1 macro data unavailable ({'None' if df_macro is None else len(df_macro)} bars) — suppressing signal (fail-closed)."
+                                    )
+                                    continue
 
                         # Evaluate on completed/closed candles to prevent repainting
                         df_low_eval = df_low.iloc[:-1].copy() if len(df_low) > 2 else df_low
@@ -363,6 +410,20 @@ def main():
 
                         if signal.signal_type == models.SignalType.NEUTRAL:
                             logger.debug(f"[{label}] {symbol}: No setup — {signal.comment}")
+                            continue
+
+                        # Directional Conflict Lock: Block opposing trades (hedging) on the same symbol
+                        allow_opposing = config.get("strategy", {}).get("allow_opposing_trades", False)
+                        active_for_symbol = state_store.get_active_trades(symbol)
+                        is_allowed, block_reason = check_directional_conflict(
+                            active_for_symbol,
+                            signal.signal_type.name,
+                            allow_opposing=allow_opposing
+                        )
+                        if not is_allowed:
+                            logger.warning(
+                                f"[{label}] {symbol}: Signal {signal.signal_type.name} blocked — {block_reason}"
+                            )
                             continue
 
                         # C. Durable dedup claim — locked to closed candle timestamp

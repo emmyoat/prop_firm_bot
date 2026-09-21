@@ -203,7 +203,8 @@ telegram:
   enabled: true
   enable_reports: false     # Periodic performance reports
   report_interval_hours: 4
-  chat_id: ""               # Also loadable from TELEGRAM_CHAT_ID in .env
+  chat_id: ""               # Main alert channel/chat ID (also loadable from TELEGRAM_CHAT_ID in .env)
+  admin_chat_id: ""         # Optional personal user ID for private /status commands (also TELEGRAM_ADMIN_CHAT_ID)
   token: ""                 # Also loadable from TELEGRAM_TOKEN in .env
   retry:
     max_attempts: 2

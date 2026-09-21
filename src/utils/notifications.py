@@ -47,6 +47,15 @@ def get_chart_link(symbol: str, timeframe: str = "H1") -> str:
     tv_interval = TF_TO_TV.get(timeframe.upper(), "60")
     return TRADINGVIEW_URL.format(symbol=tv_sym, interval=tv_interval)
 
+class TelegramCommand(str):
+    """A command string (e.g. '/status') that preserves the incoming chat_id."""
+    chat_id: str
+
+    def __new__(cls, value: str, chat_id: str = ""):
+        obj = super().__new__(cls, value)
+        obj.chat_id = chat_id
+        return obj
+
 
 class TelegramNotifier:
     def __init__(
@@ -64,8 +73,31 @@ class TelegramNotifier:
         if token_clean.startswith("bot"):
             token_clean = token_clean[3:]
         self.token = token_clean
-        self.chat_id = str(chat_id or "").strip().strip('"').strip("'")
+        raw_chat_id = str(chat_id or "").strip().strip('"').strip("'")
         self.enabled = enabled
+
+        # Parse authorized chat IDs (supports single ID or comma-separated list)
+        auth_set = set()
+        if raw_chat_id:
+            for cid in raw_chat_id.split(","):
+                c_clean = cid.strip().strip('"').strip("'")
+                if c_clean:
+                    auth_set.add(c_clean)
+
+        tg_cfg = (config or {}).get("telegram", {})
+        extra_auth = tg_cfg.get("authorized_chat_ids") or tg_cfg.get("admin_chat_id") or []
+        if isinstance(extra_auth, (str, int)):
+            extra_auth = [extra_auth]
+        for cid in extra_auth:
+            for sub_cid in str(cid).split(","):
+                c_clean = sub_cid.strip().strip('"').strip("'")
+                if c_clean:
+                    auth_set.add(c_clean)
+
+        # Primary broadcast chat ID (first listed, e.g. signal channel)
+        self.chat_id = raw_chat_id.split(",")[0].strip().strip('"').strip("'") if raw_chat_id else ""
+        self.authorized_chat_ids = auth_set if auth_set else ({self.chat_id} if self.chat_id else set())
+
         self.base_url = f"https://api.telegram.org/bot{self.token}"
         self.session = session or requests.Session()
         self.state_store = state_store
@@ -113,14 +145,20 @@ class TelegramNotifier:
             for update in updates:
                 max_update_id = max(max_update_id, int(update["update_id"]))
                 msg = update.get("message") or update.get("channel_post") or {}
-                if str(msg.get("chat", {}).get("id", "")) != self.chat_id:
-                    logger.warning("Ignored Telegram command from unauthorized chat.")
+                incoming_chat_id = str(msg.get("chat", {}).get("id", "")).strip()
+                if not incoming_chat_id or incoming_chat_id not in self.authorized_chat_ids:
+                    sender = msg.get("from", {}).get("username") or msg.get("from", {}).get("first_name") or "unknown"
+                    expected_str = ", ".join(sorted(self.authorized_chat_ids)) if self.authorized_chat_ids else self.chat_id
+                    logger.warning(
+                        f"Ignored Telegram command from unauthorized chat (received: {incoming_chat_id or 'empty'} from {sender}, expected: {expected_str})."
+                    )
                     continue
                 text = msg.get("text", "").strip()
                 if text and text.startswith("/"):
                     clean_cmd = text.split()[0].split("@")[0].lower()
-                    logger.info(f"Telegram command received: '{clean_cmd}' (raw: '{text}')")
-                    commands.append(clean_cmd)
+                    cmd_obj = TelegramCommand(clean_cmd, chat_id=incoming_chat_id)
+                    logger.info(f"Telegram command received from {incoming_chat_id}: '{clean_cmd}' (raw: '{text}')")
+                    commands.append(cmd_obj)
         except (KeyError, TypeError, ValueError) as exc:
             self._record_failure(f"Invalid update payload: {exc}")
             return []
@@ -132,15 +170,16 @@ class TelegramNotifier:
 
     # ── Outbound ──────────────────────────────────────────────────────────────
 
-    def send_message(self, message: str, parse_mode: str = "Markdown") -> bool:
-        """Sends a plain text message."""
-        if not self.enabled or not self.token or not self.chat_id:
+    def send_message(self, message: str, parse_mode: str = "Markdown", chat_id: Optional[str] = None) -> bool:
+        """Sends a plain text message. If chat_id is provided, sends to that chat, else default self.chat_id."""
+        target_chat_id = str(chat_id or self.chat_id).strip()
+        if not self.enabled or not self.token or not target_chat_id:
             logger.debug("Telegram disabled or missing credentials.")
             return False
 
         url     = f"{self.base_url}/sendMessage"
         payload = {
-            "chat_id":    self.chat_id,
+            "chat_id":    target_chat_id,
             "text":       message,
             "parse_mode": parse_mode,
         }
@@ -148,7 +187,7 @@ class TelegramNotifier:
         result = self._request("post", url, json=payload)
         if result is None:
             return False
-        logger.info("Telegram notification sent.")
+        logger.info(f"Telegram notification sent to {target_chat_id}.")
         return True
 
     def send_signal_alert(

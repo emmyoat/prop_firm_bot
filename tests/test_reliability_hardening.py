@@ -274,3 +274,57 @@ def test_health_transitions_and_stale_evaluation(tmp_path):
     assert transitions[-1]["component"] == "scan_loop"
     assert transitions[-1]["status"] == "degraded"
     assert store.get_health()
+
+
+def test_telegram_multi_chat_authorization_and_targeted_reply(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "ok": True,
+                    "result": [
+                        # Unauthorized chat
+                        {"update_id": 20, "message": {"chat": {"id": "999"}, "from": {"username": "intruder"}, "text": "/status"}},
+                        # Authorized channel
+                        {"update_id": 21, "channel_post": {"chat": {"id": "-100123456"}, "text": "/stats"}},
+                        # Authorized admin user DM
+                        {"update_id": 22, "message": {"chat": {"id": "555"}, "from": {"username": "admin"}, "text": "/health"}},
+                    ],
+                },
+            ),
+            # Response for send_message targeted to admin
+            FakeResponse(200, {"ok": True, "result": {"message_id": 100}}),
+        ]
+    )
+    notifier = TelegramNotifier(
+        token="test-token",
+        chat_id="-100123456",
+        config={
+            "telegram": {
+                "admin_chat_id": "555",
+                "retry": {"max_attempts": 1},
+            }
+        },
+        state_store=store,
+        session=session,
+    )
+
+    assert "-100123456" in notifier.authorized_chat_ids
+    assert "555" in notifier.authorized_chat_ids
+    assert notifier.chat_id == "-100123456"
+
+    commands = notifier.get_updates()
+    assert len(commands) == 2
+    assert commands[0] == "/stats"
+    assert commands[0].chat_id == "-100123456"
+    assert commands[1] == "/health"
+    assert commands[1].chat_id == "555"
+
+    # Verify sending message to targeted chat_id
+    success = notifier.send_message("reply to admin", chat_id=commands[1].chat_id)
+    assert success is True
+    post_call = [call for call in session.calls if call[0] == "post"][0]
+    assert post_call[2]["json"]["chat_id"] == "555"
+

@@ -182,8 +182,11 @@ def main():
             logger.warning("TwelveData API: Connection check failed — will retry on first fetch.")
 
     # ── Telegram ──────────────────────────────────────────────────────────────
-    tg_token   = config["telegram"].get("token")   or creds.get("telegram_token")
-    tg_chat_id = config["telegram"].get("chat_id") or creds.get("telegram_chat_id")
+    tg_token    = config["telegram"].get("token")   or creds.get("telegram_token")
+    tg_chat_id  = config["telegram"].get("chat_id") or creds.get("telegram_chat_id")
+    tg_admin_id = config["telegram"].get("admin_chat_id") or creds.get("telegram_admin_chat_id")
+    if tg_admin_id and "admin_chat_id" not in config["telegram"]:
+        config["telegram"]["admin_chat_id"] = tg_admin_id
 
     notifier = TelegramNotifier(
         token=tg_token,
@@ -194,7 +197,9 @@ def main():
     )
 
     if tg_token and tg_chat_id:
-        logger.info(f"Telegram alerts enabled (Chat ID: ...{str(tg_chat_id)[-4:]})") 
+        auth_count = len(getattr(notifier, "authorized_chat_ids", []))
+        auth_hint = f" ({auth_count} authorized chats)" if auth_count > 1 else ""
+        logger.info(f"Telegram alerts enabled (Chat ID: ...{str(tg_chat_id)[-4:]}){auth_hint}") 
         notifier.send_message("⚡ *NimsBot Signal Engine Started*")
     else:
         logger.warning("Telegram token/chat_id missing — notifications disabled.")
@@ -483,20 +488,22 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
     if logger is None:
         logger = logging.getLogger("PropBot")
     summary = risk_manager.get_summary()
+    reply_chat_id = getattr(cmd, "chat_id", None)
 
     if cmd in ["/start", "/help"]:
         notifier.send_message(
-            "⚡ *PropBot Engine*\n"
+            "⚡ *NimsBot Engine*\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "/status  — Account health & drawdown status\n"
             "/health  — Runtime dependency health\n"
             "/stats   — Today's trading performance\n"
-            "/help    — This menu"
+            "/help    — This menu",
+            chat_id=reply_chat_id,
         )
     elif cmd == "/health":
         health_monitor = getattr(risk_manager, "health_monitor", None)
         if health_monitor is None:
-            notifier.send_message("Health monitor is not available.")
+            notifier.send_message("Health monitor is not available.", chat_id=reply_chat_id)
         else:
             health = health_monitor.summary()
             lines = [f"*Runtime Health:* `{health['status']}`"]
@@ -506,27 +513,29 @@ def _handle_telegram_command(cmd: str, notifier: TelegramNotifier, risk_manager:
                     f"`{component['component']}`: *{component['status']}*"
                     f" ({component['consecutive_failures']} failures){reason}"
                 )
-            notifier.send_message("\n".join(lines))
+            notifier.send_message("\n".join(lines), chat_id=reply_chat_id)
     elif cmd == "/status":
         notifier.send_message(
             f"📊 *Bot & Account Status*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Balance:   `${summary['virtual_balance']:,.2f}`\n"
             f"Equity:    `${summary['virtual_equity']:,.2f}`\n"
-            f"P&L:       `{'+' if summary['paper_pnl']>=0 else ''}{summary['paper_pnl']:.2f}`"
+            f"P&L:       `{'+' if summary['paper_pnl']>=0 else ''}{summary['paper_pnl']:.2f}`",
+            chat_id=reply_chat_id,
         )
-        logger.info("Telegram /status requested")
+        logger.info(f"Telegram /status requested by chat {reply_chat_id or 'default'}")
     elif cmd == "/stats":
         notifier.send_message(
             f"*Today's Signals*\n"
             f"Signals: `{summary['signals_today']}`\n"
             f"Wins:    `{summary['wins_today']}`\n"
             f"Losses:  `{summary['losses_today']}`\n"
-            f"Paper PnL: `{summary['daily_pnl']:+.2f}`"
+            f"Paper PnL: `{summary['daily_pnl']:+.2f}`",
+            chat_id=reply_chat_id,
         )
-        logger.info("Telegram /stats requested")
+        logger.info(f"Telegram /stats requested by chat {reply_chat_id or 'default'}")
     else:
-        notifier.send_message("Unknown command. Type /help for the menu.")
+        notifier.send_message("Unknown command. Type /help for the menu.", chat_id=reply_chat_id)
 
 
 def _send_health_transition(notifier: TelegramNotifier, transition: dict, logger=None):

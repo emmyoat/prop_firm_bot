@@ -29,8 +29,9 @@ def load_credentials(env_path=".env"):
 
     return {
         # Telegram
-        "telegram_token":      os.getenv("TELEGRAM_TOKEN"),
-        "telegram_chat_id":    os.getenv("TELEGRAM_CHAT_ID"),
+        "telegram_token":          os.getenv("TELEGRAM_TOKEN"),
+        "telegram_chat_id":        os.getenv("TELEGRAM_CHAT_ID"),
+        "telegram_admin_chat_id":  os.getenv("TELEGRAM_ADMIN_CHAT_ID"),
         # TwelveData
-        "twelvedata_api_key":  os.getenv("TWELVEDATA_API_KEY"),
+        "twelvedata_api_key":      os.getenv("TWELVEDATA_API_KEY"),
     }

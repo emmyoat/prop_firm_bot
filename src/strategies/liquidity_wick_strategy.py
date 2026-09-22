@@ -211,6 +211,16 @@ class LiquidityWickStrategy(Strategy):
         if signal_type != SignalType.NEUTRAL:
             is_sweep = "Sweep" in setup_comment
 
+            # ── Allowed setup filter per timeframe label ──────────────────────
+            allowed_setups_map = self.config.get('strategy', {}).get('allowed_setups_map', {})
+            allowed_setups = allowed_setups_map.get(label, self.config.get('strategy', {}).get('allowed_setups', ['sweep', 'breakout']))
+            if is_sweep and 'sweep' not in allowed_setups:
+                logger.debug(f"{symbol} [{label}] Reversal sweep suppressed by allowed_setups_map ({allowed_setups})")
+                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"Sweep disabled for {label}")
+            if not is_sweep and 'breakout' not in allowed_setups:
+                logger.debug(f"{symbol} [{label}] Continuation breakout suppressed by allowed_setups_map ({allowed_setups})")
+                return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0, comment=f"Breakout disabled for {label}")
+
             # ── Macro gate (applied to the CHOSEN setup) ──────────────────────
             if macro_trend != SignalType.NEUTRAL and macro_trend != signal_type:
                 if not (is_sweep and self.sweep_allow_counter_macro):

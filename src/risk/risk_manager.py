@@ -41,6 +41,7 @@ class RiskConfig:
     min_trade_duration_seconds:    Optional[int] = 240
     pending_order_expiry_hours:    Optional[int] = 4
     symbol_risk_map:               Optional[dict] = None
+    loss_cooldown_minutes:         Optional[int] = 0
 
 
 class RiskManager:
@@ -79,11 +80,18 @@ class RiskManager:
         self.wins_today:     int   = 0
         self.losses_today:   int   = 0
         self.trading_date:   str   = datetime.now(timezone.utc).date().isoformat()
+        self.last_loss_times: dict[str, str] = {}
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
     def initialize_state(self):
         """Load the persisted account snapshot and apply any missed UTC rollover."""
+        stored_loss_times = self.state_store.get_runtime_value(f"last_loss_times_{self.magic_number}")
+        if isinstance(stored_loss_times, dict):
+            self.last_loss_times = stored_loss_times
+        else:
+            self.last_loss_times = {}
+
         state = self.state_store.get_risk_state(self.magic_number)
         if state:
             persisted_initial = float(state.get("initial_balance") or 0.0)
@@ -186,10 +194,10 @@ class RiskManager:
         self.signals_today += 1
         self._save_state()
 
-    def record_paper_trade(self, pnl: float):
+    def record_paper_trade(self, pnl: float, symbol: Optional[str] = None):
         """
         Records a paper trade outcome (TP hit = positive, SL hit = negative).
-        Updates virtual equity and drawdown tracking.
+        Updates virtual equity, drawdown tracking, and post-loss cooldown.
         """
         self.ensure_daily_rollover()
         self.paper_pnl  += pnl
@@ -199,6 +207,16 @@ class RiskManager:
             self.wins_today += 1
         else:
             self.losses_today += 1
+            now_iso = datetime.now(timezone.utc).isoformat()
+            self.last_loss_times["__global__"] = now_iso
+            if symbol:
+                self.last_loss_times[symbol] = now_iso
+            try:
+                self.state_store.set_runtime_value(
+                    f"last_loss_times_{self.magic_number}", self.last_loss_times
+                )
+            except Exception as store_err:
+                logger.warning(f"Could not persist last_loss_times: {store_err}")
 
         self.update_high_water_mark(self._current_equity())
         self._save_state()
@@ -261,22 +279,53 @@ class RiskManager:
 
         return False, ""
 
-    def check_signal_allowed(self, symbol: str, spread_estimate: float = 0.0) -> Tuple[bool, str]:
+    def get_loss_cooldown_remaining(
+        self, symbol: Optional[str] = None, now: Optional[datetime] = None
+    ) -> float:
+        """Returns remaining cooldown in minutes for symbol (or 0.0 if inactive/expired)."""
+        cooldown_mins = getattr(self.config, "loss_cooldown_minutes", 0) or 0
+        if cooldown_mins <= 0:
+            return 0.0
+        loss_iso = None
+        if symbol:
+            loss_iso = self.last_loss_times.get(symbol)
+        if not loss_iso:
+            loss_iso = self.last_loss_times.get("__global__")
+        if not loss_iso:
+            return 0.0
+        try:
+            loss_dt = datetime.fromisoformat(loss_iso)
+            current_time = now or datetime.now(timezone.utc)
+            elapsed_mins = (current_time - loss_dt).total_seconds() / 60.0
+            if 0 <= elapsed_mins < cooldown_mins:
+                return round(cooldown_mins - elapsed_mins, 1)
+        except Exception:
+            pass
+        return 0.0
+
+    def check_signal_allowed(
+        self, symbol: str, spread_estimate: float = 0.0, now: Optional[datetime] = None
+    ) -> Tuple[bool, str]:
         """
         Validates whether a new signal should be acted on.
         Replaces the old check_trade_allowed(account_info, symbol_info, spread_points).
         """
-        # 1. Drawdown limits
+        # 1. Post-loss cooldown guard
+        remaining_cooldown = self.get_loss_cooldown_remaining(symbol=symbol, now=now)
+        if remaining_cooldown > 0:
+            return False, f"Post-loss cooldown active: {remaining_cooldown:.1f}m remaining after recent stop-out ({symbol})"
+
+        # 2. Drawdown limits
         breached, reason = self.check_emergency_exit()
         if breached:
             return False, reason
 
-        # 2. Profit target
+        # 3. Profit target
         target_hit, msg = self.check_profit_target()
         if target_hit:
             return False, f"Daily profit target already hit — {msg}"
 
-        # 3. Spread check (if caller provides an estimate)
+        # 4. Spread check (if caller provides an estimate)
         if spread_estimate > 0:
             limit_map   = self.config.spread_limit_map or {}
             max_spread  = limit_map.get(symbol, self.config.max_spread_points)
@@ -379,4 +428,5 @@ class RiskManager:
             "signals_today":     self.signals_today,
             "wins_today":        self.wins_today,
             "losses_today":      self.losses_today,
+            "loss_cooldown_remaining_min": self.get_loss_cooldown_remaining(),
         }

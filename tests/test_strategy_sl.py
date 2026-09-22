@@ -89,3 +89,33 @@ def test_max_sl_pips_cap_enforced():
         sl_dist = abs(sig.price - sig.sl_price)
         # Cap is 100 pips * 0.1 = $10.00
         assert sl_dist <= 10.01
+
+
+def test_allowed_setups_map_filtering():
+    """
+    Verifies that allowed_setups_map properly allows or suppresses
+    reversal sweeps and continuation breakouts per timeframe label.
+    """
+    df = _make_test_df()
+    
+    # 1. Config with sweeps only for SCALP (must block the breakout fixture)
+    cfg = _make_strategy_config()
+    cfg["strategy"]["allowed_setups_map"] = {
+        "SCALP": ["sweep"],
+        "SCALP_M5": ["sweep", "breakout"]
+    }
+
+    strat = LiquidityWickStrategy(cfg)
+    sig_scalp = strat.generate_signal(
+        {"LowTF": df, "HighTF": df, "MacroTF": df}, "XAUUSD", label="SCALP"
+    )
+    # The fixture produces a breakout, so SCALP (sweep only) must suppress it
+    assert sig_scalp.signal_type == SignalType.NEUTRAL
+    assert "Breakout disabled for SCALP" in sig_scalp.comment
+
+    # 2. SCALP_M5 allows breakouts, so it should NOT be blocked
+    sig_m5 = strat.generate_signal(
+        {"LowTF": df, "HighTF": df, "MacroTF": df}, "XAUUSD", label="SCALP_M5"
+    )
+    assert sig_m5.signal_type != SignalType.NEUTRAL
+    assert "Breakout disabled" not in sig_m5.comment

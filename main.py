@@ -905,7 +905,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                         tick_value = TICK_VALUE_MAP.get(symbol, 10.0)
                         tick_size = TICK_SIZE_MAP.get(symbol, 0.0001)
                         pnl_usd = (pnl_pips * pip_unit / tick_size) * tick_value * lot_size if tick_size > 0 else 0.0
-                        risk_manager.record_paper_trade(pnl_usd)
+                        risk_manager.record_paper_trade(pnl_usd, symbol=symbol)
                     except Exception as pnl_err:
                         logger.warning(f"Could not record paper PnL: {pnl_err}")
 

@@ -126,10 +126,8 @@ class LiquidityWickStrategy(Strategy):
         if rsi_enabled and len(df_entry) > 20:
             rsi_value = self._calculate_rsi(df_entry['close'], self.config['strategy'].get('rsi_period', 14))
 
-        # ── 5. Identify Liquidity (Recent Swing Points on Entry TF) ────────────
-        window = df_entry.iloc[-self.lookback:-1]
-        support_level = window['low'].min()
-        resistance_level = window['high'].max()
+        # ── 5. Identify Liquidity (Swing Points on Entry TF) ──────────────────
+        support_level, resistance_level = self._find_swing_points(df_entry, self.lookback)
         last_candle = df_entry.iloc[-1]
 
         logger.debug(
@@ -186,23 +184,25 @@ class LiquidityWickStrategy(Strategy):
             if current_trend == SignalType.BUY:
                 if last_candle['close'] > resistance_level and last_candle['close'] > last_candle['open']:
                     body = last_candle['close'] - last_candle['open']
-                    if total_range > 0 and (body / total_range) >= 0.50:
+                    close_position = (last_candle['close'] - last_candle['low']) / total_range if total_range > 0 else 0
+                    if total_range > 0 and (body / total_range) >= 0.60 and close_position >= 0.75:
                         signal_type = SignalType.BUY
                         entry_candle = last_candle
                         setup_comment = "Liquidity Breakout (continuation)"
                     else:
-                        logger.debug(f"{symbol} [{label}] Buy-Breakout: Weak Body")
+                        logger.debug(f"{symbol} [{label}] Buy-Breakout: Weak Body (ratio={body/total_range:.2f}, close_pos={close_position:.2f})")
                 else:
                     logger.debug(f"{symbol} [{label}] No Buy Setup (Close {last_candle['close']:.5f} !> Res {resistance_level:.5f})")
             elif current_trend == SignalType.SELL:
                 if last_candle['close'] < support_level and last_candle['close'] < last_candle['open']:
                     body = last_candle['open'] - last_candle['close']
-                    if total_range > 0 and (body / total_range) >= 0.50:
+                    close_position = (last_candle['high'] - last_candle['close']) / total_range if total_range > 0 else 0
+                    if total_range > 0 and (body / total_range) >= 0.60 and close_position >= 0.75:
                         signal_type = SignalType.SELL
                         entry_candle = last_candle
                         setup_comment = "Liquidity Breakout (continuation)"
                     else:
-                        logger.debug(f"{symbol} [{label}] Sell-Breakout: Weak Body")
+                        logger.debug(f"{symbol} [{label}] Sell-Breakout: Weak Body (ratio={body/total_range:.2f}, close_pos={close_position:.2f})")
                 else:
                     logger.debug(f"{symbol} [{label}] No Sell Setup (Close {last_candle['close']:.5f} !< Supp {support_level:.5f})")
             else:
@@ -276,31 +276,51 @@ class LiquidityWickStrategy(Strategy):
             # Stop Loss Calculation Mode: 'atr' (distance from entry) or 'candle_extreme' (opposite wick)
             sl_mode = self.config['strategy'].get('sl_mode', 'atr')
             if sl_mode == "atr":
-                sl_atr_mult_map = self.config['strategy'].get('sl_atr_multiplier_map', {})
-                sl_atr_mult = sl_atr_mult_map.get(label, self.config['strategy'].get('sl_atr_multiplier', 1.5))
+                if is_sweep:
+                    # SWEEP: SL at candle extreme (structural invalidation) + ATR buffer.
+                    # The candle wick IS the liquidity sweep; a close beyond it
+                    # invalidates the setup. Using the wick + small buffer produces
+                    # a tighter, structurally meaningful SL.
+                    sweep_sl_atr_mult = self.config['strategy'].get('sweep_sl_atr_buffer', 0.3)
+                    sl_buffer_dist = max(valid_atr * sweep_sl_atr_mult, fallback_buffer)
+                    if signal_type == SignalType.BUY:
+                        stop_loss = last_candle['low'] - sl_buffer_dist
+                    else:
+                        stop_loss = last_candle['high'] + sl_buffer_dist
+                    sl_dist = abs(price - stop_loss)
+                    logger.debug(f"{symbol} [{label}] SL Mode=Sweep-Structural | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f}")
+                else:
+                    # BREAKOUT: ATR-based SL (no single structural invalidation point)
+                    sl_atr_mult_map = self.config['strategy'].get('sl_atr_multiplier_map', {})
+                    sl_atr_mult = sl_atr_mult_map.get(label, self.config['strategy'].get('sl_atr_multiplier', 1.5))
 
-                session_name = data.get("session_name", "")
-                session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
-                if session_name and session_name in session_atr_map:
-                    session_factor = session_atr_map[session_name]
-                    sl_atr_mult *= session_factor
+                    session_name = data.get("session_name", "")
+                    session_atr_map = self.config['strategy'].get('session_atr_multiplier_map', {})
+                    if session_name and session_name in session_atr_map:
+                        session_factor = session_atr_map[session_name]
+                        sl_atr_mult *= session_factor
 
-                sl_dist = valid_atr * sl_atr_mult
-                sl_dist = max(sl_dist, fallback_buffer)
+                    sl_dist = valid_atr * sl_atr_mult
+                    sl_dist = max(sl_dist, fallback_buffer)
 
-                # Hard cap on SL distance in pips if configured
+                    if signal_type == SignalType.BUY:
+                        stop_loss = price - sl_dist
+                    else:
+                        stop_loss = price + sl_dist
+                    logger.debug(f"{symbol} [{label}] SL Mode=ATR | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f} (ATR={valid_atr:.2f}, Mult={sl_atr_mult:.2f})")
+
+                # Hard cap on SL distance in pips if configured (both modes)
                 max_sl_map = self.config['strategy'].get('max_sl_pips_map', {})
                 max_pips = max_sl_map.get(label, self.config['strategy'].get('max_sl_pips', None))
                 if max_pips:
                     pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
-                    sl_dist = min(sl_dist, max_pips * pip_unit)
-
-                if signal_type == SignalType.BUY:
-                    stop_loss = price - sl_dist
-                else:
-                    stop_loss = price + sl_dist
-
-                logger.debug(f"{symbol} [{label}] SL Mode=ATR | Price={price:.5f} | SL={stop_loss:.5f} | Dist={sl_dist:.2f} (ATR={valid_atr:.2f}, Mult={sl_atr_mult:.2f})")
+                    max_dist = max_pips * pip_unit
+                    actual_dist = abs(price - stop_loss)
+                    if actual_dist > max_dist:
+                        if signal_type == SignalType.BUY:
+                            stop_loss = price - max_dist
+                        else:
+                            stop_loss = price + max_dist
             else:
                 # Legacy: opposite side of signal candle + buffer
                 atr_multiplier = self.config['strategy'].get('atr_multiplier', 1.5)
@@ -324,10 +344,11 @@ class LiquidityWickStrategy(Strategy):
 
                 logger.debug(f"{symbol} [{label}] SL Mode=CandleExtreme | Price={price:.5f} | SL={stop_loss:.5f}")
 
-            # Take Profit — reversals may use a looser R:R floor (config sweep_min_rr)
+            # Take Profit — per-label R:R and HTF structure for breakouts
             min_rr_override = self.config['strategy'].get('sweep_min_rr') if is_sweep else None
             tp_price = self._find_target(df_entry, signal_type, price, stop_loss,
-                                         min_rr_override=min_rr_override)
+                                         min_rr_override=min_rr_override,
+                                         label=label, df_trend=df_trend)
 
             logger.debug(f"{symbol} [{label}] {setup_comment} | Price={price:.5f} | SL={stop_loss:.5f} | TP={tp_price:.5f}")
             return Signal(symbol, signal_type, price, stop_loss, tp_price,
@@ -336,14 +357,28 @@ class LiquidityWickStrategy(Strategy):
         return Signal(symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0)
 
     def _get_trend(self, df: pd.DataFrame) -> SignalType:
-        """Price vs SMA for trend direction."""
+        """Price vs SMA for trend direction, with slope confirmation.
+
+        Requires the SMA itself to be sloping in the declared direction.
+        This eliminates flat-SMA whipsaw crosses that produce false breakout
+        signals in consolidating/ranging markets.
+        """
         sma = df['close'].rolling(window=self.sma_period).mean()
-        
-        if df['close'].iloc[-1] > sma.iloc[-1]:
-             return SignalType.BUY
-        elif df['close'].iloc[-1] < sma.iloc[-1]:
-             return SignalType.SELL
-        
+        sma_clean = sma.dropna()
+
+        if len(sma_clean) < 5:
+            return SignalType.NEUTRAL
+
+        price_above = df['close'].iloc[-1] > sma.iloc[-1]
+        price_below = df['close'].iloc[-1] < sma.iloc[-1]
+        sma_rising = sma_clean.iloc[-1] > sma_clean.iloc[-5]
+        sma_falling = sma_clean.iloc[-1] < sma_clean.iloc[-5]
+
+        if price_above and sma_rising:
+            return SignalType.BUY
+        elif price_below and sma_falling:
+            return SignalType.SELL
+
         return SignalType.NEUTRAL
 
     def _get_macro_trend(self, df: pd.DataFrame, period: int = 20) -> SignalType:
@@ -358,13 +393,15 @@ class LiquidityWickStrategy(Strategy):
         return SignalType.NEUTRAL
 
     def _find_target(self, df: pd.DataFrame, signal_type: SignalType, entry_price: float,
-                     sl_price: float = 0.0, min_rr_override: float = None) -> float:
+                     sl_price: float = 0.0, min_rr_override: float = None,
+                     label: str = None, df_trend: pd.DataFrame = None) -> float:
         """
         Finds the Take Profit target.
         Hybrid Approach:
         1. Identify Structural Target (Peak High/Low).
-        2. Enforce Minimum R:R Floor (e.g., at least 3.0R if structure is too close).
-        3. Cap at Conservative Max R:R (e.g., 5.0R).
+        2. For breakouts where local structure is broken, use HighTF structure.
+        3. Enforce per-label R:R Floor (SCALP=2.0R, DAY=2.5R, SWING=3.0R).
+        4. Cap at Conservative Max R:R.
         """
         # Look back for Structure
         window = df.iloc[-self.lookback:-1]
@@ -373,19 +410,22 @@ class LiquidityWickStrategy(Strategy):
         if risk == 0:
             risk = 0.0010  # Fallback 10 pips equivalent
         
-        # Minimum R:R floor (at least 3.0R) and Max R:R Cap.
-        # Reversal sweeps may pass a looser floor so a counter-trend entry is not
-        # forced to chase a structure target it cannot realistically reach.
+        # Per-label R:R from config (SCALP=2.0, DAY=2.5, SWING=3.0)
+        rr_map = self.config['strategy'].get('risk_reward_ratio_map', {})
+        label_rr = rr_map.get(label, self.risk_reward_ratio) if label else self.risk_reward_ratio
+
         min_rr = min_rr_override if (min_rr_override and min_rr_override > 0) else (
-            self.risk_reward_ratio if self.risk_reward_ratio > 0 else 3.0)
-        max_rr = self.config['strategy'].get('max_risk_reward_ratio', 5.0)
+            label_rr if label_rr > 0 else 3.0)
+
+        max_rr_map = self.config['strategy'].get('max_risk_reward_ratio_map', {})
+        max_rr = max_rr_map.get(label, self.config['strategy'].get('max_risk_reward_ratio', 5.0)) if label else self.config['strategy'].get('max_risk_reward_ratio', 5.0)
 
         # Check for Infinite TP (Runner Mode)
         if self.config['strategy'].get('infinite_tp', False):
             return 0.0  # No TP, let Trail Stop handle it
 
         if self.config['strategy'].get('tp_mode') == 'fixed_rr':
-            rr = self.risk_reward_ratio
+            rr = label_rr if label_rr > 0 else self.risk_reward_ratio
             if signal_type == SignalType.BUY:
                 return entry_price + (risk * rr)
             else:
@@ -396,11 +436,16 @@ class LiquidityWickStrategy(Strategy):
             max_target = entry_price + (risk * max_rr)
             structure_target = window['high'].max()
 
+            # Breakout: local structure already broken — use HighTF structure
+            if structure_target <= entry_price and df_trend is not None and len(df_trend) > 5:
+                htf_window = df_trend.iloc[-20:]
+                htf_target = htf_window['high'].max()
+                if htf_target > entry_price:
+                    structure_target = htf_target
+
             if structure_target <= entry_price:
                 return min_target
 
-            # If structure is too close (< min_rr, e.g. 0.73R), enforce at least 3.0R (min_target)
-            # Capped at max_rr (5.0R)
             return min(max(structure_target, min_target), max_target)
         
         elif signal_type == SignalType.SELL:
@@ -408,12 +453,16 @@ class LiquidityWickStrategy(Strategy):
             max_target = entry_price - (risk * max_rr)
             structure_target = window['low'].min()
 
+            # Breakout: local structure already broken — use HighTF structure
+            if structure_target >= entry_price and df_trend is not None and len(df_trend) > 5:
+                htf_window = df_trend.iloc[-20:]
+                htf_target = htf_window['low'].min()
+                if htf_target < entry_price:
+                    structure_target = htf_target
+
             if structure_target >= entry_price:
                 return min_target
 
-            # For SELL, lower price = more profit.
-            # If structure is too close (higher than min_target), enforce at least 3.0R (min_target)
-            # Capped at max_rr (max_target)
             return max(min(structure_target, min_target), max_target)
         
         return 0.0
@@ -450,6 +499,37 @@ class LiquidityWickStrategy(Strategy):
         
         atr = tr.rolling(window=period).mean().iloc[-1]
         return atr if not pd.isna(atr) else 0.0
+
+    def _find_swing_points(self, df: pd.DataFrame, lookback: int) -> tuple:
+        """Find true swing highs/lows using 3-bar pivot logic.
+
+        Rolling min/max is distorted by outlier wicks and noise.
+        Pivot detection requires a bar's high/low to exceed both its
+        neighbors, producing more meaningful liquidity levels.
+
+        Returns (support_level, resistance_level).
+        """
+        start = max(0, len(df) - lookback - 2)
+        end = len(df) - 1  # Exclude current candle
+        window = df.iloc[start:end]
+
+        if len(window) < 3:
+            return window['low'].min(), window['high'].max()
+
+        swing_highs = []
+        swing_lows = []
+
+        for i in range(1, len(window) - 1):
+            if (window['high'].iloc[i] >= window['high'].iloc[i - 1] and
+                    window['high'].iloc[i] >= window['high'].iloc[i + 1]):
+                swing_highs.append(window['high'].iloc[i])
+            if (window['low'].iloc[i] <= window['low'].iloc[i - 1] and
+                    window['low'].iloc[i] <= window['low'].iloc[i + 1]):
+                swing_lows.append(window['low'].iloc[i])
+
+        support = min(swing_lows) if swing_lows else window['low'].min()
+        resistance = max(swing_highs) if swing_highs else window['high'].max()
+        return support, resistance
 
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
         """

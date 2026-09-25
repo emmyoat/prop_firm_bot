@@ -460,7 +460,7 @@ def main():
                                     logger.warning(f"SMC filter error: {smc_err}")
 
                         # E. Risk check
-                        allowed_signal, block_reason = risk_manager.check_signal_allowed(symbol)
+                        allowed_signal, block_reason = risk_manager.check_signal_allowed(symbol, label=label)
                         if not allowed_signal:
                             state_store.release_signal(dedup_key, candle_time_str)
                             logger.warning(f"Signal blocked: {block_reason}")
@@ -638,6 +638,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
     trail_dist_pips = risk_cfg.get("trailing_stop_distance_pips", 40)
     trail_step_pips = risk_cfg.get("trailing_step_pips", 40)
     pending_expiry_hours = risk_cfg.get("pending_order_expiry_hours", 4)
+    post_trigger_grace_bars = risk_cfg.get("post_trigger_grace_bars", 1)
 
     tf_seconds_map = {"M1": 60, "M5": 300, "M15": 900, "M30": 1800, "H1": 3600, "H4": 14400, "D1": 86400}
 
@@ -708,6 +709,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
 
             # ── Check Pending Order Trigger & Trigger Bar Resolution ──
             is_trigger_bar = False
+            is_in_grace_period = False
             trigger_bar_time = trade.get("trigger_bar_time", "")
 
             if trade.get("is_stop_order") and not trade.get("triggered"):
@@ -729,6 +731,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     trade["highest_price"] = max(float(trade["entry"]), bar_close)
                     trade["lowest_price"] = min(float(trade["entry"]), bar_close)
                     is_trigger_bar = True
+                    is_in_grace_period = True
                     logger.info(f"Pending order triggered: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
                 else:
                     continue
@@ -746,8 +749,11 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                             # Pre-trigger historical bar — skip
                             continue
                         is_trigger_bar = (bar_ts == trig_ts)
+                        bars_since_trigger = int(round((bar_ts - trig_ts) / tf_sec)) if tf_sec > 0 else 0
+                        is_in_grace_period = is_trigger_bar or (0 <= bars_since_trigger <= post_trigger_grace_bars)
                     except Exception:
                         is_trigger_bar = (bar_time_str == trigger_bar_time)
+                        is_in_grace_period = is_trigger_bar
                 else:
                     # Legacy or market order without trigger_bar_time
                     if bar_ts + tf_sec <= created_ts:
@@ -755,8 +761,10 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     elif bar_ts <= created_ts < bar_ts + tf_sec:
                         trade["trigger_bar_time"] = bar_time_str
                         is_trigger_bar = True
+                        is_in_grace_period = True
                     else:
                         is_trigger_bar = False
+                        is_in_grace_period = False
 
             # Trade is actively open — update excursion tracking on current bar
             if is_trigger_bar:
@@ -833,10 +841,14 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
             exit_price = None
 
             if is_buy:
-                # If evaluating on the trigger bar, guard against pre-breakout candle extremes
-                # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
+                # If evaluating on the trigger bar or within post-trigger grace period,
+                # guard against early wick spikes falsely hitting SL before the move develops.
+                # Only candle close beyond SL counts during trigger bar / grace period.
                 if is_trigger_bar:
                     tp_hit = trade["tp"] > 0 and bar_close >= trade["tp"]
+                    sl_hit = bar_close <= trade["current_sl"]
+                elif is_in_grace_period and not (just_breakeven or just_trailed):
+                    tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
                     sl_hit = bar_close <= trade["current_sl"]
                 elif just_breakeven or just_trailed:
                     tp_hit = trade["tp"] > 0 and (bar_high >= trade["tp"] or bar_close >= trade["tp"])
@@ -864,10 +876,14 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                         exit_type = "BE_HIT" if trade.get("be_alerted") else "SL_HIT"
                         exit_price = trade["current_sl"]
             else:
-                # If evaluating on the trigger bar, guard against pre-breakout candle extremes
-                # falsely hitting initial SL or TP. Only candle close beyond TP/SL counts on trigger bar.
+                # If evaluating on the trigger bar or within post-trigger grace period,
+                # guard against early wick spikes falsely hitting SL before the move develops.
+                # Only candle close beyond SL counts during trigger bar / grace period.
                 if is_trigger_bar:
                     tp_hit = trade["tp"] > 0 and bar_close <= trade["tp"]
+                    sl_hit = bar_close >= trade["current_sl"]
+                elif is_in_grace_period and not (just_breakeven or just_trailed):
+                    tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
                     sl_hit = bar_close >= trade["current_sl"]
                 elif just_breakeven or just_trailed:
                     tp_hit = trade["tp"] > 0 and (bar_low <= trade["tp"] or bar_close <= trade["tp"])
@@ -905,7 +921,7 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                         tick_value = TICK_VALUE_MAP.get(symbol, 10.0)
                         tick_size = TICK_SIZE_MAP.get(symbol, 0.0001)
                         pnl_usd = (pnl_pips * pip_unit / tick_size) * tick_value * lot_size if tick_size > 0 else 0.0
-                        risk_manager.record_paper_trade(pnl_usd, symbol=symbol)
+                        risk_manager.record_paper_trade(pnl_usd, symbol=symbol, label=label)
                     except Exception as pnl_err:
                         logger.warning(f"Could not record paper PnL: {pnl_err}")
 

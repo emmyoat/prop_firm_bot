@@ -41,13 +41,12 @@ def calculate_confluence_score(
     matching_ob = None
     matching_fvg = None
     
-    # Define the zone of interest (between entry and SL for validation)
-    if signal_type == 'BUY':
-        zone_top = entry_price
-        zone_bottom = stop_loss
-    else:
-        zone_top = stop_loss
-        zone_bottom = entry_price
+    # Define the zone of interest — tight band around entry price (±0.5×risk).
+    # Previously used the full entry-to-SL range, which matched OBs/FVGs at the
+    # far SL level and inflated scores for entries without genuine support.
+    half_risk = abs(entry_price - stop_loss) * 0.5 if stop_loss != 0 else 0
+    zone_top = entry_price + half_risk
+    zone_bottom = entry_price - half_risk
     
     # --- Check for Order Block ---
     for ob in order_blocks:

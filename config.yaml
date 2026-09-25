@@ -75,6 +75,7 @@ risk:
 
   # Post-Loss Cooldown Guard (prevents rapid consecutive stop-outs in choppy markets)
   loss_cooldown_minutes: 45             # Pause new signals on a symbol for 45 mins after a stop-out
+  post_trigger_grace_bars: 1            # 1-bar grace period after trigger uses bar_close for SL to avoid wick spikes
 
   symbol_risk_map:
     XAUUSD: 1.0
@@ -116,6 +117,18 @@ strategy:
     SWING: 350          # Cap SWING SL at 350 pips ($35.00 on Gold)
   tp_mode: "dynamic"        # Options: "structured", "dynamic", "fixed_rr"
   risk_reward_ratio: 3.0
+  risk_reward_ratio_map:
+    SCALP_M5: 2.0         # Nimble scalp targets (avoids unreachable 3R on M5)
+    SCALP: 2.0            # M15 scalp targets
+    DAY: 2.5              # H1 day trade targets
+    SWING: 3.0            # H4/D1 swing targets
+  max_risk_reward_ratio: 5.0
+  max_risk_reward_ratio_map:
+    SCALP_M5: 3.0
+    SCALP: 3.0
+    DAY: 4.0
+    SWING: 5.0
+  sweep_sl_atr_buffer: 0.3              # Structural invalidation wick + 0.3*ATR buffer
   news_blocked_times: []
 
   # SMC Filter (Order Block + FVG Confluence)
@@ -173,11 +186,11 @@ strategy:
   fail_closed_macro_gate: true     # Block setups when higher-timeframe D1 macro data is unavailable
 
   # Active timeframe pairs to scan (macro-to-micro hierarchy)
+  # High-Win-Rate Profile: M15/H1/H4 timeframes only (eliminates M5 noise)
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
     - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }
-    - { low: "M5", high: "H1", label: "SCALP_M5" }
 
   # Session-specific ATR multipliers (applied on top of base atr_multiplier)
   # Wider SL in volatile sessions, tighter in quiet ones

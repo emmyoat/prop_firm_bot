@@ -81,6 +81,7 @@ class RiskManager:
         self.losses_today:   int   = 0
         self.trading_date:   str   = datetime.now(timezone.utc).date().isoformat()
         self.last_loss_times: dict[str, str] = {}
+        self.consecutive_losses: int = 0
 
     # ── Initialisation ────────────────────────────────────────────────────────
 
@@ -91,6 +92,8 @@ class RiskManager:
             self.last_loss_times = stored_loss_times
         else:
             self.last_loss_times = {}
+        stored_streak = self.state_store.get_runtime_value(f"consecutive_losses_{self.magic_number}", 0)
+        self.consecutive_losses = int(stored_streak) if stored_streak else 0
 
         state = self.state_store.get_risk_state(self.magic_number)
         if state:
@@ -194,7 +197,7 @@ class RiskManager:
         self.signals_today += 1
         self._save_state()
 
-    def record_paper_trade(self, pnl: float, symbol: Optional[str] = None):
+    def record_paper_trade(self, pnl: float, symbol: Optional[str] = None, label: Optional[str] = None):
         """
         Records a paper trade outcome (TP hit = positive, SL hit = negative).
         Updates virtual equity, drawdown tracking, and post-loss cooldown.
@@ -205,15 +208,23 @@ class RiskManager:
 
         if pnl >= 0:
             self.wins_today += 1
+            self.consecutive_losses = 0  # Reset streak on any win
         else:
             self.losses_today += 1
+            self.consecutive_losses += 1
             now_iso = datetime.now(timezone.utc).isoformat()
             self.last_loss_times["__global__"] = now_iso
             if symbol:
                 self.last_loss_times[symbol] = now_iso
+            # Per-label cooldown key (e.g. XAUUSD_SCALP_M5)
+            if symbol and label:
+                self.last_loss_times[f"{symbol}_{label}"] = now_iso
             try:
                 self.state_store.set_runtime_value(
                     f"last_loss_times_{self.magic_number}", self.last_loss_times
+                )
+                self.state_store.set_runtime_value(
+                    f"consecutive_losses_{self.magic_number}", self.consecutive_losses
                 )
             except Exception as store_err:
                 logger.warning(f"Could not persist last_loss_times: {store_err}")
@@ -280,14 +291,28 @@ class RiskManager:
         return False, ""
 
     def get_loss_cooldown_remaining(
-        self, symbol: Optional[str] = None, now: Optional[datetime] = None
+        self, symbol: Optional[str] = None, label: Optional[str] = None,
+        now: Optional[datetime] = None
     ) -> float:
-        """Returns remaining cooldown in minutes for symbol (or 0.0 if inactive/expired)."""
+        """Returns remaining cooldown in minutes.
+
+        Checks per-label key first (e.g. XAUUSD_SCALP_M5), then per-symbol,
+        then global. Cooldown escalates with consecutive losses:
+        1 loss = base cooldown, 2 = 2×, 3+ = 3× (capped).
+        """
         cooldown_mins = getattr(self.config, "loss_cooldown_minutes", 0) or 0
         if cooldown_mins <= 0:
             return 0.0
+
+        # Escalate cooldown based on consecutive losses (cap at 3×)
+        streak = max(1, self.consecutive_losses)
+        effective_cooldown = cooldown_mins * min(streak, 3)
+
+        # Look up loss time: per-label > per-symbol > global
         loss_iso = None
-        if symbol:
+        if symbol and label:
+            loss_iso = self.last_loss_times.get(f"{symbol}_{label}")
+        if not loss_iso and symbol:
             loss_iso = self.last_loss_times.get(symbol)
         if not loss_iso:
             loss_iso = self.last_loss_times.get("__global__")
@@ -297,21 +322,22 @@ class RiskManager:
             loss_dt = datetime.fromisoformat(loss_iso)
             current_time = now or datetime.now(timezone.utc)
             elapsed_mins = (current_time - loss_dt).total_seconds() / 60.0
-            if 0 <= elapsed_mins < cooldown_mins:
-                return round(cooldown_mins - elapsed_mins, 1)
+            if 0 <= elapsed_mins < effective_cooldown:
+                return round(effective_cooldown - elapsed_mins, 1)
         except Exception:
             pass
         return 0.0
 
     def check_signal_allowed(
-        self, symbol: str, spread_estimate: float = 0.0, now: Optional[datetime] = None
+        self, symbol: str, spread_estimate: float = 0.0, now: Optional[datetime] = None,
+        label: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Validates whether a new signal should be acted on.
         Replaces the old check_trade_allowed(account_info, symbol_info, spread_points).
         """
-        # 1. Post-loss cooldown guard
-        remaining_cooldown = self.get_loss_cooldown_remaining(symbol=symbol, now=now)
+        # 1. Post-loss cooldown guard (per-label isolation)
+        remaining_cooldown = self.get_loss_cooldown_remaining(symbol=symbol, label=label, now=now)
         if remaining_cooldown > 0:
             return False, f"Post-loss cooldown active: {remaining_cooldown:.1f}m remaining after recent stop-out ({symbol})"
 

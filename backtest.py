@@ -382,9 +382,16 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
             pending_orders = []
             closed_trades  = []
 
-            trailing_enabled = config["risk"].get("trailing_stop_enabled", True)
+            trailing_enabled = config["risk"].get("trailing_stop_enabled", False)
             trailing_activation = config["risk"].get("trailing_stop_activation_pips", 100) * pip_unit
             trailing_distance = config["risk"].get("trailing_stop_distance_pips", 40) * pip_unit
+
+            be_enabled = config["risk"].get("breakeven_enabled", True)
+            be_activation = config["risk"].get("breakeven_activation_pips", 250) * pip_unit
+            grace_bars = config["risk"].get("post_trigger_grace_bars", 1)
+            cooldown_mins = config["risk"].get("loss_cooldown_minutes", 45)
+            last_loss_time = None
+            consecutive_losses = 0
 
             print(f"  {symbol} [{label}] {tf_low}/{tf_high} — {len(df_low)} bars", end="", flush=True)
 
@@ -421,48 +428,104 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
                                 (order["type"] == "SELL_STOP" and bar["low"]  <= order["entry"])
                     if triggered:
                         active_trades.append({
-                            "type":       "BUY" if "BUY" in order["type"] else "SELL",
-                            "entry":      order["entry"],
-                            "sl":         order["sl"],
-                            "tp":         order["tp"],
-                            "entry_hour": curr_time.hour,
+                            "type":          "BUY" if "BUY" in order["type"] else "SELL",
+                            "entry":         order["entry"],
+                            "sl":            order["sl"],
+                            "tp":            order["tp"],
+                            "entry_hour":    curr_time.hour,
+                            "trigger_bar":   True,
+                            "bars_held":     0,
+                            "be_activated":  False,
                         })
                         pending_orders.remove(order)
 
                 # ── Trade management ──────────────────────────────────────────
                 for t in active_trades[:]:
                     exit_price = None
+                    is_trigger = t.get("trigger_bar", False)
+                    in_grace = is_trigger or (t.get("bars_held", 0) <= grace_bars)
+
+                    # Breakeven check
+                    if be_enabled and not t.get("be_activated"):
+                        profit = (bar["high"] - t["entry"]) if t["type"] == "BUY" else (t["entry"] - bar["low"])
+                        if profit >= be_activation:
+                            t["sl"] = t["entry"]
+                            t["be_activated"] = True
+
                     if t["type"] == "BUY":
-                        if bar["low"] <= t["sl"]:
-                            exit_price = t["sl"]
-                        elif t["tp"] > 0 and bar["high"] >= t["tp"]:
-                            exit_price = t["tp"]
-                        elif trailing_enabled:
-                            profit_dist = bar["high"] - t["entry"]
-                            if profit_dist >= trailing_activation:
-                                new_sl = t["entry"] + (profit_dist - trailing_distance)
-                                if new_sl > t["sl"]:
-                                    t["sl"] = new_sl
+                        if is_trigger:
+                            # Trigger bar: candle close beyond SL/TP
+                            if bar["close"] <= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and bar["close"] >= t["tp"]:
+                                exit_price = t["tp"]
+                        elif in_grace and not t.get("be_activated"):
+                            # Grace period: bar_close for SL to avoid retracement wicks
+                            if bar["close"] <= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and (bar["high"] >= t["tp"] or bar["close"] >= t["tp"]):
+                                exit_price = t["tp"]
+                        else:
+                            # Normal evaluation
+                            if bar["low"] <= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and bar["high"] >= t["tp"]:
+                                exit_price = t["tp"]
+                            elif trailing_enabled:
+                                profit_dist = bar["high"] - t["entry"]
+                                if profit_dist >= trailing_activation:
+                                    new_sl = t["entry"] + (profit_dist - trailing_distance)
+                                    if new_sl > t["sl"]:
+                                        t["sl"] = new_sl
                     else:
-                        if bar["high"] >= t["sl"]:
-                            exit_price = t["sl"]
-                        elif t["tp"] > 0 and bar["low"] <= t["tp"]:
-                            exit_price = t["tp"]
-                        elif trailing_enabled:
-                            profit_dist = t["entry"] - bar["low"]
-                            if profit_dist >= trailing_activation:
-                                new_sl = t["entry"] - (profit_dist - trailing_distance)
-                                if new_sl < t["sl"]:
-                                    t["sl"] = new_sl
+                        if is_trigger:
+                            # Trigger bar: candle close beyond SL/TP
+                            if bar["close"] >= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and bar["close"] <= t["tp"]:
+                                exit_price = t["tp"]
+                        elif in_grace and not t.get("be_activated"):
+                            # Grace period: bar_close for SL to avoid retracement wicks
+                            if bar["close"] >= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and (bar["low"] <= t["tp"] or bar["close"] <= t["tp"]):
+                                exit_price = t["tp"]
+                        else:
+                            # Normal evaluation
+                            if bar["high"] >= t["sl"]:
+                                exit_price = t["sl"]
+                            elif t["tp"] > 0 and bar["low"] <= t["tp"]:
+                                exit_price = t["tp"]
+                            elif trailing_enabled:
+                                profit_dist = t["entry"] - bar["low"]
+                                if profit_dist >= trailing_activation:
+                                    new_sl = t["entry"] - (profit_dist - trailing_distance)
+                                    if new_sl < t["sl"]:
+                                        t["sl"] = new_sl
 
                     if exit_price is not None:
                         t["pnl"]     = (exit_price - t["entry"]) if t["type"] == "BUY" else (t["entry"] - exit_price)
                         t["session"] = get_session(t.get("entry_hour", 12))
+                        if t["pnl"] < 0:
+                            consecutive_losses += 1
+                            last_loss_time = curr_time
+                        else:
+                            consecutive_losses = 0
                         closed_trades.append(t)
                         active_trades.remove(t)
+                    else:
+                        t["trigger_bar"] = False
+                        t["bars_held"] = t.get("bars_held", 0) + 1
 
                 # ── Signal generation (only when flat & in active session) ────
                 if not active_trades and not pending_orders:
+                    # Escalating post-loss cooldown check
+                    if cooldown_mins > 0 and last_loss_time is not None:
+                        eff_cooldown = cooldown_mins * min(max(1, consecutive_losses), 3)
+                        elapsed = (curr_time - last_loss_time).total_seconds() / 60.0
+                        if 0 <= elapsed < eff_cooldown:
+                            continue
+
                     # Respect active_sessions from config (mirrors live bot behaviour)
                     active_sessions = config.get("system", {}).get("active_sessions", [])
                     if active_sessions:

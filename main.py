@@ -363,6 +363,15 @@ def main():
                         if allowed and label not in allowed:
                             continue
 
+                        # Per-pair session filter (e.g. SCALP_M5 restricted to London/NY Overlap)
+                        allowed_sess = pair.get("allowed_sessions")
+                        if allowed_sess and session_name not in allowed_sess:
+                            logger.debug(
+                                f"[{label}] {symbol}: Current session '{session_name}' not in allowed sessions "
+                                f"{allowed_sess} — skipping."
+                            )
+                            continue
+
                         # Suppress duplicate signals if a trade is already open on this timeframe label
                         active_for_symbol = state_store.get_active_trades(symbol)
                         if any(t.get("label") == label for t in active_for_symbol):

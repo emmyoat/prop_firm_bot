@@ -236,13 +236,18 @@ def run_variant(strategy, data_cache: dict, config: dict, symbols: list,
                 # Signal generation (only when flat & in active session)
                 if not active_trades and not pending_orders:
                     active_sessions = config.get("system", {}).get("active_sessions", [])
+                    curr_session = None
                     if active_sessions:
-                        in_session = any(
-                            s.get("start_utc", 0) <= curr_time.hour < s.get("end_utc", 24)
-                            for s in active_sessions
-                        )
-                        if not in_session:
+                        for s in active_sessions:
+                            if s.get("start_utc", 0) <= curr_time.hour < s.get("end_utc", 24):
+                                curr_session = s.get("name")
+                                break
+                        if curr_session is None:
                             continue
+
+                    allowed_sess = pair.get("allowed_sessions")
+                    if allowed_sess and curr_session not in allowed_sess:
+                        continue
 
                     htf_slice = df_high[df_high.index <= curr_time]
                     if len(htf_slice) < 20:

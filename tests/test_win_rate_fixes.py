@@ -319,3 +319,33 @@ def test_find_target_per_label_rr():
     # SWING: min R:R = 3.0 -> TP = 2000 + 30 = 2030.0
     tp_swing = strat._find_target(df, SignalType.BUY, entry, sl, label="SWING")
     assert tp_swing == pytest.approx(2030.0)
+
+
+# ==============================================================================
+# 5. Per-Pair Session Restrictions (M5 London/NY Overlap)
+# ==============================================================================
+
+def test_pair_allowed_sessions_filter():
+    """Verify that pairs with allowed_sessions are only processed in matching sessions."""
+    active_pairs = [
+        {"low": "M15", "high": "H1", "label": "SCALP"},
+        {"low": "M5", "high": "H1", "label": "SCALP_M5", "allowed_sessions": ["London/NY Overlap"]},
+    ]
+
+    def _should_scan(pair: dict, current_session: str) -> bool:
+        allowed = pair.get("allowed_sessions")
+        if allowed and current_session not in allowed:
+            return False
+        return True
+
+    # During London (08:00 - 12:00 UTC): SCALP is scanned, SCALP_M5 is skipped
+    assert _should_scan(active_pairs[0], "London") is True
+    assert _should_scan(active_pairs[1], "London") is False
+
+    # During London/NY Overlap (12:00 - 17:00 UTC): both are scanned
+    assert _should_scan(active_pairs[0], "London/NY Overlap") is True
+    assert _should_scan(active_pairs[1], "London/NY Overlap") is True
+
+    # During New York (18:00 - 22:00 UTC): SCALP is scanned, SCALP_M5 is skipped
+    assert _should_scan(active_pairs[0], "New York") is True
+    assert _should_scan(active_pairs[1], "New York") is False

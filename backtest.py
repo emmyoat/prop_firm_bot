@@ -347,7 +347,7 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
             df.index = pd.to_datetime(df.index, utc=True)
 
     for symbol in symbols:
-        pip_unit = 0.1 if "XAU" in symbol else 1.0
+        pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
 
         for pair in active_pairs:
             label    = pair["label"]
@@ -528,13 +528,19 @@ def run_single(strategy, data_cache: dict, config: dict, symbols: list,
 
                     # Respect active_sessions from config (mirrors live bot behaviour)
                     active_sessions = config.get("system", {}).get("active_sessions", [])
+                    curr_session = None
                     if active_sessions:
-                        in_session = any(
-                            s.get("start_utc", 0) <= curr_time.hour < s.get("end_utc", 24)
-                            for s in active_sessions
-                        )
-                        if not in_session:
+                        for s in active_sessions:
+                            if s.get("start_utc", 0) <= curr_time.hour < s.get("end_utc", 24):
+                                curr_session = s.get("name")
+                                break
+                        if curr_session is None:
                             continue
+
+                    # Respect per-pair allowed_sessions (e.g. SCALP_M5 restricted to London/NY Overlap)
+                    allowed_sess = pair.get("allowed_sessions")
+                    if allowed_sess and curr_session not in allowed_sess:
+                        continue
                     htf_slice = df_high[df_high.index <= curr_time]
                     if len(htf_slice) < 20:
                         continue

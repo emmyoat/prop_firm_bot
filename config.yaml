@@ -11,7 +11,7 @@ system:
   timeframe: "M15"
   # Session filter: restricted to high-win-rate windows (avoids 05:00-09:00 UTC chop & 17:00 NY open spike)
   active_sessions:
-    - { name: "London",            start_utc: 8,  end_utc: 12 }
+    - { name: "London",            start_utc: 6,  end_utc: 12 }
     - { name: "London/NY Overlap", start_utc: 12, end_utc: 17 }
     - { name: "New York",          start_utc: 18, end_utc: 22 }  # Skip 17:00 NY open spike (28.6% WR)
     - { name: "Late NY / Asia",    start_utc: 22, end_utc: 24 }
@@ -145,8 +145,8 @@ strategy:
   adx_min_threshold: 20     # 0-100 scale: <20 = ranging/weak, >20 = directional
   adx_period: 14
   adx_min_threshold_map:
-    SCALP_M5: 20        # Standard momentum threshold -> unlocks high-probability continuation setups
-    SCALP: 20           # Standard momentum threshold -> unlocks high-probability continuation setups
+    SCALP_M5: 25        # Raised from 20 -> filters low-momentum morning chop
+    SCALP: 25           # Raised from 20 -> filters low-momentum morning chop
     DAY: 20
     SWING: 20
 
@@ -185,11 +185,12 @@ strategy:
   fail_closed_macro_gate: true     # Block setups when higher-timeframe D1 macro data is unavailable
 
   # Active timeframe pairs to scan (macro-to-micro hierarchy)
-  # High-Volume Scalp Profile: M15 and M5 across London, Overlap, and New York sessions
+  # High-Win-Rate Profile: M15/H1/H4 timeframes with M5 restricted to London/NY Overlap (12:00-17:00 UTC)
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
+    - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }
-    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London", "London/NY Overlap", "New York"] }
+    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London/NY Overlap"] }
 
   # Session-specific ATR multipliers (applied on top of base atr_multiplier)
   # Wider SL in volatile sessions, tighter in quiet ones

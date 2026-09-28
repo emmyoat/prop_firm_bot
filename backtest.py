@@ -5,11 +5,14 @@ Fetches historical OHLCV data from TwelveData and runs one or more strategies
 in a bar-by-bar simulation, then prints a side-by-side comparison.
 
 Usage:
-    python backtest.py [--days 60] [--symbol XAUUSD] [--compare]
+    python backtest.py [--days 30] [--symbol XAUUSD] [--compare]
+    python backtest.py [--days 30] [--tournament]   # full 4-way tournament
 
 Strategies available:
-    A  = LiquidityWickStrategy  (current live strategy)
-    B  = EMAWickStrategy        (EMA 50/200 crossover + wick confirmation)
+    A  = LiquidityWickStrategy      (current live strategy)
+    B  = EMAWickStrategy            (EMA 50/200 crossover + wick confirmation)
+    C  = SessionORBStrategy         (Session Open Range Breakout — London/NY)
+    D  = InsideBarBreakoutStrategy  (Inside bar breakout in trend direction)
 """
 
 import argparse
@@ -34,6 +37,7 @@ from src.utils.config_loader import load_config, load_credentials
 from src.utils.logger import setup_logger
 from src.data.twelvedata_loader import TwelveDataLoader
 from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
+from src.strategies.ema_pullback_strategy import EMAPullbackStrategy
 from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
 from src.models import SignalType
 
@@ -141,6 +145,247 @@ class EMAWickStrategy:
         atr = tr.rolling(period).mean().iloc[-1]
         return float(atr) if not pd.isna(atr) else 0.001
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Strategy C — Session Open Range Breakout (ORB)
+# Captures the high/low of the first N candles after session open.
+# A strong close beyond that range signals continuation.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class SessionORBStrategy:
+    """
+    Session Open Range Breakout strategy.
+
+    Logic:
+      - At London open (08:00 UTC) and NY open (13:00 UTC), track the
+        high/low of the first `orb_candles` bars to form the Opening Range.
+      - When a subsequent candle closes ABOVE the ORB high with a strong
+        body (>= body_ratio of range) => BUY Stop above that candle.
+      - When it closes BELOW the ORB low with a strong body => SELL Stop.
+      - SL: opposite side of ORB. TP: fixed R:R.
+      - Only fires once per session open (dedup via session tracking).
+    """
+
+    NAME = "SessionORB (C)"
+
+    # Session opens in UTC hours
+    SESSION_OPENS = {8: "London", 13: "NY"}
+
+    def __init__(self, config: dict):
+        self.config     = config
+        self.orb_candles  = 2     # bars forming the opening range
+        self.body_ratio   = 0.55  # min body / total_range for breakout bar
+        self.rr_target    = 2.5
+        self._orb_cache: dict = {}   # {(symbol, label, session_date, open_hour): (orb_high, orb_low)}
+
+    def generate_signal(self, data: dict, symbol: str, label: str = ""):
+        from src.models import Signal
+
+        df_entry = data.get("LowTF")
+        df_trend = data.get("HighTF")
+
+        if df_entry is None or len(df_entry) < 30:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Insufficient data")
+
+        # Only act on bars at or after a session open
+        last_bar  = df_entry.iloc[-1]
+        last_time = last_bar.get("time", None)
+        if last_time is None and hasattr(df_entry.index[-1], "hour"):
+            last_time = df_entry.index[-1]
+        try:
+            last_time = pd.Timestamp(last_time, tz="UTC") if last_time is not None else None
+        except Exception:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "No timestamp")
+
+        if last_time is None:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "No timestamp")
+
+        hour = last_time.hour
+        session_date = last_time.date()
+
+        # Find which session open we are past (if any)
+        active_open = None
+        for open_hour in sorted(self.SESSION_OPENS.keys(), reverse=True):
+            if hour >= open_hour:
+                active_open = open_hour
+                break
+
+        if active_open is None:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Not in session")
+
+        cache_key = (symbol, label, session_date, active_open)
+
+        # Build ORB if not cached for this session
+        if cache_key not in self._orb_cache:
+            # Find the orb_candles bars starting at open_hour on this date
+            orb_bars = [
+                row for _, row in df_entry.iterrows()
+                if (pd.Timestamp(row.get("time", _.name), tz="UTC").date() == session_date
+                    and pd.Timestamp(row.get("time", _.name), tz="UTC").hour == active_open)
+            ]
+            if len(orb_bars) < self.orb_candles:
+                return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "ORB forming")
+            orb_high = max(r["high"] for r in orb_bars[:self.orb_candles])
+            orb_low  = min(r["low"]  for r in orb_bars[:self.orb_candles])
+            self._orb_cache[cache_key] = (orb_high, orb_low)
+
+        orb_high, orb_low = self._orb_cache[cache_key]
+        orb_range = orb_high - orb_low
+        if orb_range <= 0:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "ORB zero range")
+
+        # We need to be at least orb_candles bars after the open
+        if hour == active_open:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Still in ORB window")
+
+        last   = df_entry.iloc[-1]
+        total  = last["high"] - last["low"]
+        if total == 0:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Zero range bar")
+
+        body = abs(last["close"] - last["open"])
+
+        # HTF trend filter (same as Strategy B)
+        trend = SignalType.NEUTRAL
+        if df_trend is not None and len(df_trend) >= 50:
+            ema50  = df_trend["close"].ewm(span=50,  adjust=False).mean()
+            ema200 = df_trend["close"].ewm(span=200, adjust=False).mean() if len(df_trend) >= 200 else ema50
+            if ema50.iloc[-1] > ema200.iloc[-1]:
+                trend = SignalType.BUY
+            elif ema50.iloc[-1] < ema200.iloc[-1]:
+                trend = SignalType.SELL
+
+        atr  = self._atr(df_entry)
+
+        # Bullish breakout
+        if (last["close"] > orb_high
+                and last["close"] > last["open"]
+                and (body / total) >= self.body_ratio
+                and (trend == SignalType.BUY or trend == SignalType.NEUTRAL)):
+            entry = last["high"] + atr * 0.1
+            sl    = orb_low - atr * 0.3
+            risk  = abs(entry - sl)
+            tp    = entry + risk * self.rr_target
+            return Signal(symbol, SignalType.BUY, entry, sl, tp,
+                          is_stop_order=True, comment="ORB Bullish Breakout")
+
+        # Bearish breakout
+        if (last["close"] < orb_low
+                and last["close"] < last["open"]
+                and (body / total) >= self.body_ratio
+                and (trend == SignalType.SELL or trend == SignalType.NEUTRAL)):
+            entry = last["low"] - atr * 0.1
+            sl    = orb_high + atr * 0.3
+            risk  = abs(sl - entry)
+            tp    = entry - risk * self.rr_target
+            return Signal(symbol, SignalType.SELL, entry, sl, tp,
+                          is_stop_order=True, comment="ORB Bearish Breakout")
+
+        return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "No ORB breakout")
+
+    def _atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        high, low, prev_close = df["high"], df["low"], df["close"].shift(1)
+        tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+        return float(atr) if not pd.isna(atr) else 0.001
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Strategy D — Inside Bar Breakout
+# Mother candle contains the next (inside) bar. Breakout of mother in
+# trend direction = high-probability continuation entry.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class InsideBarBreakoutStrategy:
+    """
+    Inside Bar Breakout in trend direction.
+
+    Logic:
+      - "Inside bar": current candle's high < prev candle high AND
+        current candle's low > prev candle low (entirely inside mother candle).
+      - Trend: EMA-50 slope on Entry TF + EMA-50 vs EMA-200 on Trend TF.
+      - BUY Stop above mother candle high (if trend = BUY).
+      - SELL Stop below mother candle low (if trend = SELL).
+      - SL: opposite side of mother candle + ATR buffer.
+      - TP: fixed R:R from config.
+    """
+
+    NAME = "InsideBar (D)"
+
+    def __init__(self, config: dict):
+        self.config    = config
+        self.rr_target = 2.5
+        self.min_mother_atr_mult = 0.8   # Mother candle must be >= 0.8x ATR (avoid tiny ranges)
+
+    def generate_signal(self, data: dict, symbol: str, label: str = ""):
+        from src.models import Signal
+
+        df_entry = data.get("LowTF")
+        df_trend = data.get("HighTF")
+
+        if df_entry is None or len(df_entry) < 60:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Insufficient data")
+
+        last   = df_entry.iloc[-1]   # current (completed) bar — the inside bar candidate
+        mother = df_entry.iloc[-2]   # mother candle
+
+        # Inside bar check: current bar must be entirely inside the mother
+        if not (last["high"] < mother["high"] and last["low"] > mother["low"]):
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Not inside bar")
+
+        # Mother candle size filter — must be meaningful
+        atr = self._atr(df_entry)
+        mother_range = mother["high"] - mother["low"]
+        if mother_range < atr * self.min_mother_atr_mult:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "Mother too small")
+
+        # Trend detection: EMA-50 slope on Entry TF
+        ema50_entry = df_entry["close"].ewm(span=50, adjust=False).mean()
+        ema50_rising  = ema50_entry.iloc[-1] > ema50_entry.iloc[-5]
+        ema50_falling = ema50_entry.iloc[-1] < ema50_entry.iloc[-5]
+        price_above   = df_entry["close"].iloc[-1] > ema50_entry.iloc[-1]
+        price_below   = df_entry["close"].iloc[-1] < ema50_entry.iloc[-1]
+
+        if price_above and ema50_rising:
+            entry_trend = SignalType.BUY
+        elif price_below and ema50_falling:
+            entry_trend = SignalType.SELL
+        else:
+            return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "No EMA trend")
+
+        # HTF confirmation
+        if df_trend is not None and len(df_trend) >= 50:
+            ema50_htf  = df_trend["close"].ewm(span=50,  adjust=False).mean()
+            ema200_htf = df_trend["close"].ewm(span=200, adjust=False).mean() if len(df_trend) >= 200 else ema50_htf
+            htf_bull = ema50_htf.iloc[-1] > ema200_htf.iloc[-1]
+            htf_bear = ema50_htf.iloc[-1] < ema200_htf.iloc[-1]
+            if entry_trend == SignalType.BUY  and not htf_bull:
+                return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "HTF misalign")
+            if entry_trend == SignalType.SELL and not htf_bear:
+                return Signal(symbol, SignalType.NEUTRAL, 0, 0, 0, "HTF misalign")
+
+        sl_buffer = atr * 0.3
+
+        if entry_trend == SignalType.BUY:
+            entry = mother["high"] + atr * 0.1
+            sl    = mother["low"]  - sl_buffer
+            risk  = abs(entry - sl)
+            tp    = entry + risk * self.rr_target
+            return Signal(symbol, SignalType.BUY, entry, sl, tp,
+                          is_stop_order=True, comment="InsideBar BUY Breakout")
+        else:
+            entry = mother["low"]  - atr * 0.1
+            sl    = mother["high"] + sl_buffer
+            risk  = abs(sl - entry)
+            tp    = entry - risk * self.rr_target
+            return Signal(symbol, SignalType.SELL, entry, sl, tp,
+                          is_stop_order=True, comment="InsideBar SELL Breakout")
+
+    def _atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        high, low, prev_close = df["high"], df["low"], df["close"].shift(1)
+        tr = pd.concat([(high - low), (high - prev_close).abs(), (low - prev_close).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean().iloc[-1]
+        return float(atr) if not pd.isna(atr) else 0.001
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Metrics
@@ -659,86 +904,180 @@ def fetch_all_data(loader: TwelveDataLoader, symbols: list, pairs: list, n_bars:
     return cache
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+
+
+# =============================================================================
+# Tournament leaderboard printer
+# =============================================================================
+
+def print_tournament(results):
+    """Ranked leaderboard for all strategies. results = [(name, metrics_dict), ...]"""
+    w = 100
+    valid = [(n, m) for n, m in results if m and m["total_trades"] > 0]
+    if not valid:
+        print("No strategies produced trades.")
+        return None
+
+    metrics_order = [
+        ("profit_factor",    "high"),
+        ("win_rate",         "high"),
+        ("net_pnl",          "high"),
+        ("expectancy",       "high"),
+        ("sharpe_ratio",     "high"),
+        ("max_drawdown",     "low"),
+        ("max_consec_losses","low"),
+    ]
+
+    scores = {n: 0 for n, _ in valid}
+    for key, direction in metrics_order:
+        vals = [(n, m[key]) for n, m in valid]
+        vals_sorted = sorted(vals, key=lambda x: x[1], reverse=(direction == "high"))
+        for rank, (name, _) in enumerate(vals_sorted, 1):
+            scores[name] += rank
+
+    ranked = sorted(valid, key=lambda x: scores[x[0]])
+
+    print("\n" + "=" * w)
+    print("  STRATEGY TOURNAMENT  --  RANKED LEADERBOARD")
+    print("=" * w)
+    print(f"  {'Rank':<8}{'Strategy':<30}{'Trades':>7}{'WR%':>7}{'PF':>7}{'Net PnL':>10}{'Expect':>10}{'MaxDD':>9}{'Sharpe':>8}  Score")
+    print("  " + "-" * (w - 2))
+    medals = {1: "[GOLD]  ", 2: "[SILVER]", 3: "[BRONZE]"}
+    for pos, (name, m) in enumerate(ranked, 1):
+        pf_str = f"{m['profit_factor']:.2f}" if m["profit_factor"] != float("inf") else "  inf"
+        medal  = medals.get(pos, "        ")
+        print(
+            f"  #{pos} {medal}  {name:<28} {m['total_trades']:>7}"
+            f" {m['win_rate']:>6.1f}%{pf_str:>7} {m['net_pnl']:>+10.2f}"
+            f" {m['expectancy']:>+10.4f} {m['max_drawdown']:>9.2f}"
+            f" {m['sharpe_ratio']:>8.2f}  {scores[name]}"
+        )
+    print("=" * w)
+
+    winner_name, winner_m = ranked[0]
+    pf_w = f"{winner_m['profit_factor']:.2f}" if winner_m["profit_factor"] != float("inf") else "inf"
+    print(f"\n  >> WINNER: {winner_name}")
+    print(f"     Profit Factor : {pf_w}")
+    print(f"     Win Rate      : {winner_m['win_rate']:.1f}%")
+    print(f"     Net PnL       : {winner_m['net_pnl']:+.2f}")
+    print(f"     Expectancy    : {winner_m['expectancy']:+.4f} per trade")
+    print(f"     Sharpe Ratio  : {winner_m['sharpe_ratio']:.2f}")
+    print(f"     Total Trades  : {winner_m['total_trades']}")
+    print("=" * w + "\n")
+    return winner_name
+
+
+# =============================================================================
 # Main
-# ══════════════════════════════════════════════════════════════════════════════
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Prop Firm Signal Bot — Backtest")
-    parser.add_argument("--config",  type=str,  default="config.yaml")
-    parser.add_argument("--env",     type=str,  default=".env")
-    parser.add_argument("--days",    type=int,  default=60,     help="Number of calendar days to backtest")
-    parser.add_argument("--symbol",  type=str,  default=None,   help="Single symbol to test (e.g. XAUUSD)")
-    parser.add_argument("--bars",    type=int,  default=5000,   help="Number of bars to download per timeframe")
-    parser.add_argument("--compare", action="store_true",       help="Run both Strategy A and B and compare")
-    parser.add_argument("--no-friday-exit", action="store_true",help="Disable Friday exit rule")
+    parser = argparse.ArgumentParser(description="Prop Firm Signal Bot -- Backtest")
+    parser.add_argument("--config",         type=str,  default="config.yaml")
+    parser.add_argument("--env",            type=str,  default=".env")
+    parser.add_argument("--days",           type=int,  default=60,    help="Calendar days to backtest")
+    parser.add_argument("--symbol",         type=str,  default=None,  help="Single symbol (e.g. XAUUSD)")
+    parser.add_argument("--bars",           type=int,  default=5000,  help="Bars per timeframe")
+    parser.add_argument("--compare",        action="store_true",      help="Run Strategy A vs B")
+    parser.add_argument("--tournament",     action="store_true",      help="Run all strategies A-E and rank")
+    parser.add_argument("--no-friday-exit", action="store_true",      help="Disable Friday exit rule")
     args = parser.parse_args()
 
     config = load_config(args.config)
     creds  = load_credentials(args.env)
 
-    # API key
     api_key = (
         config.get("data_source", {}).get("api_key")
         or creds.get("twelvedata_api_key")
         or os.environ.get("TWELVEDATA_API_KEY", "")
     )
-
     if not api_key:
         print("\n[ERROR] TWELVEDATA_API_KEY not set.")
         print("  Get a free key at https://twelvedata.com/register")
         print("  Then add it to .env:  TWELVEDATA_API_KEY=your_key_here\n")
         sys.exit(1)
 
-    loader = TwelveDataLoader(config, api_key=api_key)
-
+    loader       = TwelveDataLoader(config, api_key=api_key)
     symbols      = [args.symbol] if args.symbol else config["system"]["symbol_list"]
     active_pairs = config["strategy"].get("active_pairs", [{"low": "H4", "high": "D1", "label": "SWING"}])
     friday_exit  = not args.no_friday_exit
 
-    mode_str = "COMPARE A vs B" if args.compare else "STRATEGY A ONLY"
+    mode_str = "TOURNAMENT (A/B/C/D/E)" if args.tournament else ("COMPARE A vs B" if args.compare else "STRATEGY A ONLY")
     print(f"\n{'='*60}")
-    print(f"  BACKTEST — {mode_str}")
-    print(f"  Symbols:       {', '.join(symbols)}")
-    print(f"  Pairs:         {', '.join(p['label'] for p in active_pairs)}")
-    print(f"  Period:        Last {args.days} calendar days")
-    print(f"  Friday exit:   {'ON' if friday_exit else 'OFF'}")
+    print(f"  BACKTEST -- {mode_str}")
+    print(f"  Symbols:  {', '.join(symbols)}")
+    print(f"  Pairs:    {', '.join(p['label'] for p in active_pairs)}")
+    print(f"  Period:   Last {args.days} calendar days")
+    print(f"  Fri exit: {'ON' if friday_exit else 'OFF'}")
     print(f"{'='*60}")
 
-    # Pre-fetch all data once
     data_cache = fetch_all_data(loader, symbols, active_pairs, n_bars=args.bars)
 
-    # ── Strategy A (LiquidityWick) ─────────────────────────────────────────
+    # A: LiquidityWick (live)
     strategy_a = LiquidityWickStrategy(config)
-    print(f"\n--- Running Strategy A: LiquidityWickStrategy ---")
-    trades_a, pairs_a = run_single(
-        strategy_a, data_cache, config, symbols,
-        active_pairs, args.days, friday_exit
-    )
-    metrics_a = calculate_metrics(trades_a, "Strategy A — LiquidityWick (COMBINED)")
+    print(f"\n--- Running A: LiquidityWickStrategy (current live) ---")
+    trades_a, pairs_a = run_single(strategy_a, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+    metrics_a = calculate_metrics(trades_a, "A -- LiquidityWick (live)")
     for pm in pairs_a.values():
         print_metrics(pm, prefix="A | ")
-
     if metrics_a:
         print_metrics(metrics_a)
 
-    if args.compare:
-        # ── Strategy B (EMAWick) ───────────────────────────────────────────
+    metrics_b = metrics_c = metrics_d = metrics_e = None
+
+    if args.compare or args.tournament:
+        # B: EMAWick
         strategy_b = EMAWickStrategy(config)
-        print(f"\n--- Running Strategy B: EMAWickStrategy ---")
-        trades_b, pairs_b = run_single(
-            strategy_b, data_cache, config, symbols,
-            active_pairs, args.days, friday_exit
-        )
-        metrics_b = calculate_metrics(trades_b, "Strategy B — EMAWick (COMBINED)")
+        print(f"\n--- Running B: EMAWickStrategy ---")
+        trades_b, pairs_b = run_single(strategy_b, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+        metrics_b = calculate_metrics(trades_b, "B -- EMAWick")
         for pm in pairs_b.values():
             print_metrics(pm, prefix="B | ")
-
         if metrics_b:
             print_metrics(metrics_b)
+        if args.compare and not args.tournament:
+            print_comparison(metrics_a, metrics_b)
 
-        # ── Head-to-head comparison ────────────────────────────────────────
-        print_comparison(metrics_a, metrics_b)
+    if args.tournament:
+        # C: Session ORB
+        strategy_c = SessionORBStrategy(config)
+        print(f"\n--- Running C: SessionORBStrategy ---")
+        trades_c, pairs_c = run_single(strategy_c, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+        metrics_c = calculate_metrics(trades_c, "C -- SessionORB")
+        for pm in pairs_c.values():
+            print_metrics(pm, prefix="C | ")
+        if metrics_c:
+            print_metrics(metrics_c)
+
+        # D: Inside Bar Breakout
+        strategy_d = InsideBarBreakoutStrategy(config)
+        print(f"\n--- Running D: InsideBarBreakoutStrategy ---")
+        trades_d, pairs_d = run_single(strategy_d, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+        metrics_d = calculate_metrics(trades_d, "D -- InsideBar")
+        for pm in pairs_d.values():
+            print_metrics(pm, prefix="D | ")
+        if metrics_d:
+            print_metrics(metrics_d)
+
+        # E: EMA Pullback
+        strategy_e = EMAPullbackStrategy(config)
+        print(f"\n--- Running E: EMAPullbackStrategy ---")
+        trades_e, pairs_e = run_single(strategy_e, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+        metrics_e = calculate_metrics(trades_e, "E -- EMAPullback")
+        for pm in pairs_e.values():
+            print_metrics(pm, prefix="E | ")
+        if metrics_e:
+            print_metrics(metrics_e)
+
+        # Tournament leaderboard
+        all_results = [
+            ("A -- LiquidityWick (live)", metrics_a),
+            ("B -- EMAWick",              metrics_b),
+            ("C -- SessionORB",           metrics_c),
+            ("D -- InsideBar",            metrics_d),
+            ("E -- EMAPullback",          metrics_e),
+        ]
+        print_tournament(all_results)
 
     loader.shutdown()
 

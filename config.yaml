@@ -33,24 +33,23 @@ data_source:
   provider: "twelvedata"
   cache_seconds: 60
   timeframe_cache_seconds:
-    D1: 14400               # 4 hours (D1 trend is ultra stable — only 4 calls/day)
-    H4: 3600                # 1 hour (4-hour candle changes 6 times/day)
-    H1: 600                 # 10 minutes (6 calls/hr)
-    M15: 90                 # 1.5 minutes (fast real-time scalp updates)
-    M5: 60                  # 1 minute (eliminates alert delay right after candle close)
+    D1: 7200                # 2 hours (D1 trend is stable)
+    H4: 1800                # 30 minutes
+    H1: 300                 # 5 minutes
+    M15: 45                 # 45 seconds (fast real-time scalp updates)
+    M5: 25                  # 25 seconds (near-instant alert delivery on candle close)
   max_stale_seconds: 600    # Fail closed after 10 minutes of stale market data
-  min_request_gap_seconds: 8
-  requests_per_minute: 8
-  daily_request_limit: 800
+  min_request_gap_seconds: 1.2
+  requests_per_minute: 55
+  daily_request_limit: 50000
   retry:
     max_attempts: 3
-    base_delay_seconds: 2
-    max_delay_seconds: 30
-    jitter_seconds: 1
+    base_delay_seconds: 1.5
+    max_delay_seconds: 20
+    jitter_seconds: 0.5
     connect_timeout_seconds: 5
-    read_timeout_seconds: 45
-  # TwelveData free tier: 800 calls/day, 8 req/min
-  # Paid plans available at https://twelvedata.com/pricing
+    read_timeout_seconds: 30
+  # Upgraded to TwelveData Grow tier: 55 req/min, 50,000 calls/day
 
 # ── Risk Management ──────────────────────────────────────────────────────────
 risk:
@@ -146,8 +145,8 @@ strategy:
   adx_min_threshold: 20     # 0-100 scale: <20 = ranging/weak, >20 = directional
   adx_period: 14
   adx_min_threshold_map:
-    SCALP_M5: 25        # Raised from 20 -> filters low-momentum morning chop
-    SCALP: 25           # Raised from 20 -> filters low-momentum morning chop
+    SCALP_M5: 20        # Standard momentum threshold -> unlocks high-probability continuation setups
+    SCALP: 20           # Standard momentum threshold -> unlocks high-probability continuation setups
     DAY: 20
     SWING: 20
 
@@ -186,12 +185,11 @@ strategy:
   fail_closed_macro_gate: true     # Block setups when higher-timeframe D1 macro data is unavailable
 
   # Active timeframe pairs to scan (macro-to-micro hierarchy)
-  # High-Win-Rate Profile: M15/H1/H4 timeframes with M5 restricted to London/NY Overlap (12:00-17:00 UTC)
+  # High-Volume Scalp Profile: M15 and M5 across London, Overlap, and New York sessions
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
-    - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }
-    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London/NY Overlap"] }
+    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London", "London/NY Overlap", "New York"] }
 
   # Session-specific ATR multipliers (applied on top of base atr_multiplier)
   # Wider SL in volatile sessions, tighter in quiet ones

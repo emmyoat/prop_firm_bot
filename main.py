@@ -285,7 +285,8 @@ def main():
             # recover. Failed fetches below suppress signal processing naturally.
             # ── Daily API Budget Check ─────────────────────────────────────────
             if hasattr(data_loader, "is_daily_budget_exhausted") and data_loader.is_daily_budget_exhausted():
-                logger.warning("TwelveData daily API limit reached (800). Sleeping 5 mins until UTC midnight reset...")
+                limit_val = getattr(data_loader, "_daily_request_limit", 50000)
+                logger.warning(f"TwelveData daily API limit reached ({limit_val}). Sleeping 5 mins until UTC midnight reset...")
                 time.sleep(300)
                 continue
 

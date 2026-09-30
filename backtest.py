@@ -36,8 +36,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.utils.config_loader import load_config, load_credentials
 from src.utils.logger import setup_logger
 from src.data.twelvedata_loader import TwelveDataLoader
-from src.strategies.liquidity_wick_strategy import LiquidityWickStrategy
-from src.strategies.ema_pullback_strategy import EMAPullbackStrategy
+try:
+    from src.strategies.ema_pullback_strategy import EMAPullbackStrategy
+except ImportError:
+    EMAPullbackStrategy = None
 from src.strategies.smc_detector import detect_fvg_zones, detect_order_blocks, calculate_confluence_score
 from src.models import SignalType
 
@@ -1060,14 +1062,15 @@ def main():
             print_metrics(metrics_d)
 
         # E: EMA Pullback
-        strategy_e = EMAPullbackStrategy(config)
-        print(f"\n--- Running E: EMAPullbackStrategy ---")
-        trades_e, pairs_e = run_single(strategy_e, data_cache, config, symbols, active_pairs, args.days, friday_exit)
-        metrics_e = calculate_metrics(trades_e, "E -- EMAPullback")
-        for pm in pairs_e.values():
-            print_metrics(pm, prefix="E | ")
-        if metrics_e:
-            print_metrics(metrics_e)
+        if EMAPullbackStrategy is not None:
+            strategy_e = EMAPullbackStrategy(config)
+            print(f"\n--- Running E: EMAPullbackStrategy ---")
+            trades_e, pairs_e = run_single(strategy_e, data_cache, config, symbols, active_pairs, args.days, friday_exit)
+            metrics_e = calculate_metrics(trades_e, "E -- EMAPullback")
+            for pm in pairs_e.values():
+                print_metrics(pm, prefix="E | ")
+            if metrics_e:
+                print_metrics(metrics_e)
 
         # Tournament leaderboard
         all_results = [

@@ -65,7 +65,7 @@ risk:
 
   # Breakeven Alert (One-Time Alert at +250 pips)
   breakeven_enabled: true
-  breakeven_activation_pips: 250        # Alert to move SL to entry at +250 pips ($10.00 on Gold)
+  breakeven_activation_pips: 100        # Alert to move SL to entry at +250 pips ($10.00 on Gold)
   trailing_stop_enabled: false          # Disabled — only initial signal and one-time breakeven alert
   friday_exit_hour: 21
   sunday_open_hour: 21                  # Market reopens Sunday at 21:00 UTC
@@ -145,8 +145,8 @@ strategy:
   adx_min_threshold: 20     # 0-100 scale: <20 = ranging/weak, >20 = directional
   adx_period: 14
   adx_min_threshold_map:
-    SCALP_M5: 25        # Raised from 20 -> filters low-momentum morning chop
-    SCALP: 25           # Raised from 20 -> filters low-momentum morning chop
+    SCALP_M5: 20        # Standard momentum threshold -> unlocks high-probability continuation setups
+    SCALP: 20           # Standard momentum threshold -> unlocks high-probability continuation setups
     DAY: 20
     SWING: 20
 
@@ -185,12 +185,11 @@ strategy:
   fail_closed_macro_gate: true     # Block setups when higher-timeframe D1 macro data is unavailable
 
   # Active timeframe pairs to scan (macro-to-micro hierarchy)
-  # High-Win-Rate Profile: M15/H1/H4 timeframes with M5 restricted to London/NY Overlap (12:00-17:00 UTC)
+  # High-Volume Scalp Profile: M15 and M5 across London, Overlap, and New York sessions
   active_pairs:
     - { low: "H4", high: "D1", label: "SWING" }
-    - { low: "H1", high: "H4", label: "DAY" }
     - { low: "M15", high: "H1", label: "SCALP" }
-    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London/NY Overlap"] }
+    - { low: "M5", high: "H1", label: "SCALP_M5", allowed_sessions: ["London", "London/NY Overlap", "New York"] }
 
   # Session-specific ATR multipliers (applied on top of base atr_multiplier)
   # Wider SL in volatile sessions, tighter in quiet ones

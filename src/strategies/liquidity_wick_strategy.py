@@ -23,6 +23,9 @@ class LiquidityWickStrategy(Strategy):
         # Liquidity sweeps are REVERSAL setups, so they are evaluated in both
         # directions independent of the lagging SMA trend lock (see docs below).
         self.sweep_allow_counter_macro = config['strategy'].get('sweep_allow_counter_macro', False)
+        # HTF Support/Resistance Barrier Gate for breakouts
+        self.htf_barrier_filter_enabled = config.get('strategy', {}).get('htf_barrier_filter_enabled', True)
+        self.htf_barrier_atr_mult = config.get('strategy', {}).get('htf_barrier_atr_mult', 1.0)
 
     def generate_signal(self, data: dict, symbol: str, label: str = "") -> Signal:
         """
@@ -272,6 +275,42 @@ class LiquidityWickStrategy(Strategy):
             else:
                 # Sell Stop at Low of signal candle - Small Entry Buffer
                 price = last_candle['low'] - entry_buffer_price
+
+            # ── HTF Support / Resistance Barrier Gate (Breakouts Only) ────────
+            # Blocks continuation breakouts that fire directly into a major HTF
+            # support (for sells) or resistance (for buys) barrier.
+            if (not is_sweep
+                    and self.htf_barrier_filter_enabled
+                    and df_trend is not None
+                    and df_trend is not df_entry
+                    and len(df_trend) >= 10):
+                min_clearance = max(valid_atr * self.htf_barrier_atr_mult, fallback_buffer * 2)
+                htf_buffer = valid_atr * 0.5
+                htf_supps, htf_ress = self._get_htf_swing_levels(df_trend, self.lookback)
+
+                if signal_type == SignalType.SELL:
+                    for s in htf_supps:
+                        if (s - htf_buffer) <= price <= (s + min_clearance):
+                            logger.debug(
+                                f"{symbol} [{label}] HTF barrier gate: SELL entry {price:.2f} "
+                                f"too close to HTF support {s:.2f} (buffer={htf_buffer:.2f}, clearance={min_clearance:.2f})"
+                            )
+                            return Signal(
+                                symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                                comment=f"HTF support barrier ({s:.2f} vs entry {price:.2f})"
+                            )
+
+                elif signal_type == SignalType.BUY:
+                    for r in htf_ress:
+                        if (r - min_clearance) <= price <= (r + htf_buffer):
+                            logger.debug(
+                                f"{symbol} [{label}] HTF barrier gate: BUY entry {price:.2f} "
+                                f"too close to HTF resistance {r:.2f} (buffer={htf_buffer:.2f}, clearance={min_clearance:.2f})"
+                            )
+                            return Signal(
+                                symbol, SignalType.NEUTRAL, 0.0, 0.0, 0.0,
+                                comment=f"HTF resistance barrier ({r:.2f} vs entry {price:.2f})"
+                            )
 
             # Stop Loss Calculation Mode: 'atr' (distance from entry) or 'candle_extreme' (opposite wick)
             sl_mode = self.config['strategy'].get('sl_mode', 'atr')
@@ -530,6 +569,32 @@ class LiquidityWickStrategy(Strategy):
         support = min(swing_lows) if swing_lows else window['low'].min()
         resistance = max(swing_highs) if swing_highs else window['high'].max()
         return support, resistance
+
+    def _get_htf_swing_levels(self, df_trend: pd.DataFrame, lookback: int = 20) -> tuple[list[float], list[float]]:
+        """Extracts swing low (support) and swing high (resistance) levels from HTF data."""
+        start = max(0, len(df_trend) - lookback - 2)
+        end = len(df_trend) - 1  # Exclude current candle
+        window = df_trend.iloc[start:end]
+
+        if len(window) < 3:
+            return [float(window['low'].min())], [float(window['high'].max())]
+
+        swing_highs = []
+        swing_lows = []
+
+        for i in range(1, len(window) - 1):
+            if (window['high'].iloc[i] >= window['high'].iloc[i - 1] and
+                    window['high'].iloc[i] >= window['high'].iloc[i + 1]):
+                swing_highs.append(float(window['high'].iloc[i]))
+            if (window['low'].iloc[i] <= window['low'].iloc[i - 1] and
+                    window['low'].iloc[i] <= window['low'].iloc[i + 1]):
+                swing_lows.append(float(window['low'].iloc[i]))
+
+        if len(window) > 0:
+            swing_lows.append(float(window['low'].min()))
+            swing_highs.append(float(window['high'].max()))
+
+        return sorted(list(set(swing_lows))), sorted(list(set(swing_highs)))
 
     def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
         """

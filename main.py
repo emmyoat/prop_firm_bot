@@ -503,6 +503,7 @@ def main():
                             label=label,
                             comment=signal.comment,
                             dd_metrics=dd_metrics,
+                            is_stop_order=signal.is_stop_order,
                         )
                         if not delivered:
                             state_store.release_signal(dedup_key, candle_time_str)
@@ -728,6 +729,14 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     if (bar_dt - created_dt).total_seconds() > pending_expiry_hours * 3600:
                         state_store.remove_active_trade(trade_id)
                         logger.info(f"Pending order expired: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
+                        if notifier.enabled and notifier.token and notifier.chat_id:
+                            notifier.send_order_expired_alert(
+                                symbol=symbol,
+                                label=label,
+                                direction=trade["direction"],
+                                entry=trade["entry"],
+                                expiry_hours=pending_expiry_hours,
+                            )
                         trade_closed = True
                         break
                 except Exception:
@@ -743,6 +752,16 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
                     is_trigger_bar = True
                     is_in_grace_period = True
                     logger.info(f"Pending order triggered: {symbol} [{label}] {trade['direction']} @ {trade['entry']:.2f}")
+                    if notifier.enabled and notifier.token and notifier.chat_id:
+                        notifier.send_order_triggered_alert(
+                            symbol=symbol,
+                            label=label,
+                            direction=trade["direction"],
+                            entry=trade["entry"],
+                            current_price=bar_close,
+                            sl=trade.get("current_sl", trade["sl"]),
+                            tp=trade["tp"],
+                        )
                 else:
                     continue
             else:

@@ -184,6 +184,11 @@ strategy:
   allow_opposing_trades: false     # Block opposing positions (hedging) on the same symbol across timeframes
   fail_closed_macro_gate: true     # Block setups when higher-timeframe D1 macro data is unavailable
 
+  # Higher Timeframe (HTF) Support/Resistance Barrier Filter
+  # Blocks continuation breakouts that fire directly into a major HTF support or resistance level
+  htf_barrier_filter_enabled: true
+  htf_barrier_atr_mult: 1.0        # Minimum ATR clearance to HTF support/resistance barrier
+
   # Active timeframe pairs to scan (macro-to-micro hierarchy)
   # High-Volume Scalp Profile: M15 and M5 across London, Overlap, and New York sessions
   active_pairs:

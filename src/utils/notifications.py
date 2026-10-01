@@ -203,26 +203,95 @@ class TelegramNotifier:
         label:       str,
         comment:     str = "",
         dd_metrics:  dict | None = None,
+        is_stop_order: bool = True,
     ) -> bool:
         """
-        Sends a richly formatted signal alert with a TradingView chart link.
+        Sends a richly formatted signal alert with clear order type (STOP pending vs Market)
+        and a TradingView chart link.
         """
         icon      = "🟢🚀" if direction == "BUY" else "🔴📉"
         dir_emoji = "⬆️" if direction == "BUY" else "⬇️"
         chart_url = get_chart_link(symbol, timeframe)
 
+        if is_stop_order:
+            order_name = f"{direction} STOP (Pending)"
+            header_title = f"{icon} *{direction} STOP (Pending) — {symbol}*"
+            trigger_condition = "above" if direction == "BUY" else "below"
+            instruction = (
+                f"⚠️ *PENDING STOP ORDER — DO NOT ENTER AT MARKET*\n"
+                f"Place a `{direction} STOP` order. It triggers ONLY if price breaks {trigger_condition} `{entry:.5f}`."
+            )
+        else:
+            order_name = f"{direction} (Market)"
+            header_title = f"{icon} *{direction} SIGNAL (Market) — {symbol}*"
+            instruction = f"⚡ *MARKET ORDER* — Execute immediately at current market price."
+
         message = (
-            f"{icon} *{direction} SIGNAL — {symbol}*\n"
-            f"{dir_emoji} *{label} Setup* \n"
+            f"{header_title}\n"
+            f"{dir_emoji} *{label} Setup* | `{timeframe}`\n"
             f"━━━━━━━━━━━━━━━━━━\n"
+            f"📋 Order:  *{order_name}*\n"
             f"📍 Entry:  `{entry:.5f}`\n"
             f"🛑 SL:     `{sl:.5f}`\n"
             f"🎯 TP:     `{tp:.5f}`\n"
+            f"⚖️ R:R:    `{rr:.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{instruction}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"[📈 View Chart on TradingView]({chart_url})"
         )
 
         return self.send_message(message, parse_mode="Markdown")
+
+    def send_order_triggered_alert(
+        self,
+        symbol: str,
+        label: str,
+        direction: str,
+        entry: float,
+        current_price: float,
+        sl: float,
+        tp: float,
+    ) -> bool:
+        """
+        Sends an alert when a pending STOP order has triggered and is now an active position.
+        """
+        icon = "🟢" if direction == "BUY" else "🔴"
+        message = (
+            f"🔔 *ORDER TRIGGERED & ACTIVE — {symbol}*\n"
+            f"*{label} Setup* | `{direction}` {icon}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📍 Filled At:   `{entry:.5f}`\n"
+            f"📈 Live Price:  `{current_price:.5f}`\n"
+            f"🛑 Stop Loss:   `{sl:.5f}`\n"
+            f"🎯 Take Profit: `{tp:.5f}`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"✅ Position is now *LIVE*."
+        )
+        return self.send_message(message, parse_mode="Markdown")
+
+    def send_order_expired_alert(
+        self,
+        symbol: str,
+        label: str,
+        direction: str,
+        entry: float,
+        expiry_hours: float,
+    ) -> bool:
+        """
+        Sends an alert when an untriggered pending order expires and should be cancelled.
+        """
+        message = (
+            f"⌛ *PENDING ORDER EXPIRED — {symbol}*\n"
+            f"*{label} Setup* | `{direction}`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📍 Untriggered Entry: `{entry:.5f}`\n"
+            f"⏱️ Unfilled after:    `{expiry_hours:.0f} hours`\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"❌ *Action:* Cancel pending `{direction} STOP` order on broker."
+        )
+        return self.send_message(message, parse_mode="Markdown")
+
 
     def send_breakeven_alert(
         self,
@@ -290,7 +359,7 @@ class TelegramNotifier:
         elif "BE" in exit_type:
             icon = "🛡️"
             title = "CLOSED AT BREAKEVEN"
-            outcome = "NO LOSS (RISK-FREE)"
+            outcome = "NO LOSS"
         elif "TRAIL" in exit_type:
             icon = "💰"
             title = "TRAILING STOP HIT"

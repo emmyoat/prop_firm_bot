@@ -807,6 +807,141 @@ def test_pre_creation_completed_candle_strictly_excluded(memory_store):
     assert active[0]["triggered"] == 0
 
 
+def test_active_trade_timeframe_fetches_configured_m1(memory_store):
+    """
+    Ensure that when risk.active_trade_timeframe is configured (e.g. M1 for real-time tracking),
+    _evaluate_active_trades fetches M1 data for low-latency TP/SL/BE checks.
+    """
+    trade = {
+        "trade_id": "XAUUSD_SWING_FAST_TRACK",
+        "symbol": "XAUUSD",
+        "label": "SWING",
+        "direction": "BUY",
+        "entry": 4650.0,
+        "sl": 4630.0,
+        "tp": 4700.0,
+        "initial_sl": 4630.0,
+        "current_sl": 4630.0,
+        "is_stop_order": 0,
+        "triggered": 1,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4650.0,
+        "lowest_price": 4650.0,
+        "lot_size": 0.01,
+        "created_at": "2026-09-02T10:00:00+00:00",
+        "updated_at": "2026-09-02T10:00:00+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    df_m1 = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 10:01:00", utc=True), "open": 4651.0, "high": 4655.0, "low": 4650.0, "close": 4654.0, "volume": 10},
+    ])
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.return_value = df_m1
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+
+    config = {
+        "risk": {
+            "active_trade_timeframe": "M1",
+            "breakeven_enabled": True,
+            "breakeven_activation_pips": 100,
+        },
+        "strategy": {
+            "active_pairs": [
+                {"low": "H4", "high": "D1", "label": "SWING"},
+            ]
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    mock_loader.fetch_data.assert_called_once_with("XAUUSD", "M1", n_bars=50)
+
+
+def test_active_trade_timeframe_fallback_on_empty(memory_store):
+    """
+    Ensure that if the configured fast tracking TF (e.g. M1) returns None or empty,
+    _evaluate_active_trades gracefully falls back to the signal's label TF (e.g. H4 for SWING).
+    """
+    trade = {
+        "trade_id": "XAUUSD_SWING_FALLBACK",
+        "symbol": "XAUUSD",
+        "label": "SWING",
+        "direction": "BUY",
+        "entry": 4650.0,
+        "sl": 4630.0,
+        "tp": 4700.0,
+        "initial_sl": 4630.0,
+        "current_sl": 4630.0,
+        "is_stop_order": 0,
+        "triggered": 1,
+        "be_alerted": 0,
+        "last_trail_sl": 0.0,
+        "highest_price": 4650.0,
+        "lowest_price": 4650.0,
+        "lot_size": 0.01,
+        "created_at": "2026-09-02T10:00:00+00:00",
+        "updated_at": "2026-09-02T10:00:00+00:00",
+    }
+    memory_store.save_active_trade(trade)
+
+    df_h4 = pd.DataFrame([
+        {"time": pd.to_datetime("2026-09-02 12:00:00", utc=True), "open": 4651.0, "high": 4655.0, "low": 4650.0, "close": 4654.0, "volume": 10},
+    ])
+    mock_loader = MagicMock()
+    mock_loader.fetch_data.side_effect = [None, df_h4]
+
+    mock_notifier = MagicMock()
+    mock_notifier.enabled = True
+
+    config = {
+        "risk": {
+            "active_trade_timeframe": "M1",
+            "breakeven_enabled": True,
+            "breakeven_activation_pips": 100,
+        },
+        "strategy": {
+            "active_pairs": [
+                {"low": "H4", "high": "D1", "label": "SWING"},
+            ]
+        }
+    }
+
+    _evaluate_active_trades(memory_store, mock_loader, mock_notifier, config)
+    assert mock_loader.fetch_data.call_count == 2
+    mock_loader.fetch_data.assert_any_call("XAUUSD", "M1", n_bars=50)
+    mock_loader.fetch_data.assert_any_call("XAUUSD", "H4", n_bars=100)
+
+
+def test_telegram_notifier_nonblocking_get_updates():
+    """
+    Ensure TelegramNotifier.get_updates polls with timeout=0 to prevent blocking the main loop.
+    """
+    from src.utils.notifications import TelegramNotifier
+    notifier = TelegramNotifier("fake_token", "123456", enabled=True)
+    notifier._request = MagicMock(return_value={"ok": True, "result": []})
+    notifier.get_updates()
+    notifier._request.assert_called_once()
+    kwargs = notifier._request.call_args[1]
+    assert kwargs["params"]["timeout"] == 0
+
+
+def test_telegram_notifier_plain_text_fallback():
+    """
+    Ensure send_message automatically falls back to plain text if Markdown entity parsing fails.
+    """
+    from src.utils.notifications import TelegramNotifier
+    notifier = TelegramNotifier("fake_token", "123456", enabled=True)
+    notifier._request = MagicMock(side_effect=[None, {"ok": True, "result": {}}])
+    sent = notifier.send_message("*Test message with [unclosed markdown", parse_mode="Markdown")
+    assert sent is True
+    assert notifier._request.call_count == 2
+    fallback_kwargs = notifier._request.call_args_list[1][1]
+    assert "parse_mode" not in fallback_kwargs["json"]
+
+
 
 
 

@@ -274,7 +274,11 @@ def main():
 
     try:
         while True:
-            time.sleep(config.get("runtime", {}).get("scan_interval_seconds", 5))
+            # Dynamic sleep interval: when active trades are open, poll faster (5s) for instant TP/SL/BE alerts
+            has_active_trades = bool(state_store.get_active_trades())
+            base_scan_interval = config.get("runtime", {}).get("scan_interval_seconds", 10)
+            sleep_interval = min(5, base_scan_interval) if has_active_trades else base_scan_interval
+            time.sleep(sleep_interval)
             health.heartbeat()
             risk_manager.ensure_daily_rollover()
             health.evaluate()
@@ -338,7 +342,7 @@ def main():
             # ── Session filter ────────────────────────────────────────────────
             if not in_active_session(config):
                 logger.debug(f"Outside active sessions ({session_name}). Waiting...")
-                time.sleep(30)
+                time.sleep(sleep_interval if has_active_trades else 30)
                 continue
 
             # ── Periodic performance report ───────────────────────────────────
@@ -670,9 +674,19 @@ def _evaluate_active_trades(state_store: StateStore, data_loader: TwelveDataLoad
         pip_unit = 0.1 if "XAU" in symbol else (0.01 if "JPY" in symbol else 0.0001)
         is_buy = trade["direction"] == "BUY"
 
-        # Timeframe for tracking: match the entry timeframe of the signal
-        tf = label_tf_map.get(label) or default_tf_map.get(label, "M15")
-        df = data_loader.fetch_data(symbol, tf, n_bars=100)
+        # Timeframe for tracking: check if active_trade_timeframe is configured (e.g. M1 for real-time tracking)
+        active_tf = risk_cfg.get("active_trade_timeframe")
+        label_tf = label_tf_map.get(label) or default_tf_map.get(label, "M15")
+        tf = active_tf or label_tf
+
+        bars_to_fetch = 50 if tf == "M1" else 100
+        df = data_loader.fetch_data(symbol, tf, n_bars=bars_to_fetch)
+        if (df is None or df.empty) and active_tf and active_tf != label_tf:
+            # Fallback to label TF if fast tracking TF returned no data
+            logger.warning(f"Active trade tracking: no data for {symbol} on {active_tf}, falling back to {label_tf}")
+            tf = label_tf
+            df = data_loader.fetch_data(symbol, tf, n_bars=100)
+
         if df is None or df.empty:
             continue
 

@@ -34,10 +34,11 @@ data_source:
   cache_seconds: 60
   timeframe_cache_seconds:
     D1: 7200                # 2 hours (D1 trend is stable)
-    H4: 1800                # 30 minutes
-    H1: 300                 # 5 minutes
-    M15: 45                 # 45 seconds (fast real-time scalp updates)
-    M5: 25                  # 25 seconds (near-instant alert delivery on candle close)
+    H4: 120                 # 2 minutes (down from 30m for fast H4 candle close updates)
+    H1: 60                  # 1 minute (down from 5m for fast H1 candle close updates)
+    M15: 15                 # 15 seconds (down from 45s for prompt signal spotting)
+    M5: 10                  # 10 seconds (down from 25s for near-instant alert delivery on candle close)
+    M1: 5                   # 5 seconds (ultra-fast active trade lifecycle monitoring)
   max_stale_seconds: 600    # Fail closed after 10 minutes of stale market data
   min_request_gap_seconds: 1.2
   requests_per_minute: 55
@@ -62,6 +63,9 @@ risk:
     XAUUSD: 30
   martingale_multiplier: 1.0       # 1.0 = No Martingale
   max_lot_size: 5.0
+
+  # Active Trade Tracking (High-frequency M1 candles for near-instant TP/SL/BE alerts)
+  active_trade_timeframe: "M1"
 
   # Breakeven Alert (One-Time Alert at +250 pips)
   breakeven_enabled: true
@@ -224,7 +228,7 @@ strategy:
 runtime:
   state_db_path: "runtime_state.db"
   trades_csv_path: "trades.csv"
-  scan_interval_seconds: 30             # 30-second scan heartbeat ensures prompt signal detection after candle close
+  scan_interval_seconds: 10             # 10-second scan heartbeat ensures prompt signal detection & trade monitoring
 
 health:
   loop_stale_seconds: 120

@@ -89,6 +89,7 @@ class TwelveDataLoader:
             "H1": 600.0,    # 10 minutes
             "M15": 180.0,   # 3 minutes (fast real-time scalp updates)
             "M5": 60.0,     # 1 minute
+            "M1": 5.0,      # 5 seconds (ultra-fast active trade lifecycle monitoring)
         }
         if "timeframe_cache_seconds" in source_cfg:
             custom_ttls = source_cfg.get("timeframe_cache_seconds", {})
@@ -291,6 +292,8 @@ class TwelveDataLoader:
             request_bars = min(max(n_bars, 50), 1000)
         elif tf_upper in ("H1", "1H"):
             request_bars = min(max(n_bars, 50), 2000)
+        elif tf_upper in ("M1", "1MIN"):
+            request_bars = min(max(n_bars, 30), 500)
         else:
             request_bars = min(max(n_bars, 100), 5000)
 

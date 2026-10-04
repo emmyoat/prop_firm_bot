@@ -132,7 +132,7 @@ class TelegramNotifier:
 
         url    = f"{self.base_url}/getUpdates"
         offset = self.last_update_id + 1 if self.last_update_id > 0 else 0
-        params = {"offset": offset, "timeout": 1}
+        params = {"offset": offset, "timeout": 0}
 
         data = self._request("get", url, params=params)
         if not data:
@@ -185,6 +185,11 @@ class TelegramNotifier:
         }
 
         result = self._request("post", url, json=payload)
+        if result is None and parse_mode:
+            # Fallback to plain text if Markdown entity parsing failed
+            payload_plain = dict(payload)
+            payload_plain.pop("parse_mode", None)
+            result = self._request("post", url, json=payload_plain)
         if result is None:
             return False
         logger.info(f"Telegram notification sent to {target_chat_id}.")
